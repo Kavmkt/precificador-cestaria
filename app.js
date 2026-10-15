@@ -54,7 +54,8 @@ function seed() {
   };
 }
 let S;
-try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
+let HAD_LOCAL = false;
+try { HAD_LOCAL = !!localStorage.getItem(KEY); S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
 if (!S || !S.settings) S = seed();
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('Não foi possível salvar neste navegador'); } scheduleSync(); };
 
@@ -383,6 +384,9 @@ app.addEventListener('click', e => {
     if (b.id === 'syConnect') {
       if (!SY.token || !/^[\w.-]+\/[\w.-]+$/.test(SY.repo)) { toast('Preencha o repositório (dono/nome) e o token'); return; }
       SY.sha = null; saveSY(); syDirty = false; syBusy = false; syncDown(true).then(() => { renderConfig(); if ($('#sy').className === 'ok') toast('Sincronização ativada ✓'); });
+    } else if (b.id === 'syLink') {
+      const raw = btoa(unescape(encodeURIComponent(JSON.stringify({ repo: SY.repo, token: SY.token })))).replace(/\+/g, '-').replace(/\//g, '_');
+      copiar(location.origin + location.pathname + '#sync=' + raw);
     } else if (b.id === 'syOff') {
       if (!confirm('Desconectar este aparelho da nuvem? Os dados continuam salvos aqui e no GitHub.')) return;
       SY.token = ''; SY.sha = null; saveSY(); setSy('off'); renderConfig();
@@ -438,6 +442,16 @@ let SY = null;
 try { SY = JSON.parse(localStorage.getItem(SYNC_KEY)); } catch (e) { SY = null; }
 SY = Object.assign({ repo: 'Kavmkt/precificador-dados', path: 'data.json', token: '', sha: null }, SY || {});
 const saveSY = () => { try { localStorage.setItem(SYNC_KEY, JSON.stringify(SY)); } catch (e) { /* sem storage */ } };
+/* Link de acesso: https://site/#sync=<base64 {repo,token}> — o fragmento (#) nunca vai para o servidor. */
+(function importLink() {
+  const m = location.hash.match(/^#sync=([\w+/=-]+)$/);
+  if (!m) return;
+  try {
+    const d = JSON.parse(decodeURIComponent(escape(atob(m[1].replace(/-/g, '+').replace(/_/g, '/')))));
+    if (d.token && /^[\w.-]+\/[\w.-]+$/.test(d.repo || '')) { SY.repo = d.repo; SY.token = d.token; SY.sha = null; saveSY(); }
+  } catch (e) { /* link inválido */ }
+  history.replaceState(null, '', location.pathname + location.search);
+})();
 let syTimer, syDirty = false, syBusy = false;
 
 const b64enc = s => btoa(unescape(encodeURIComponent(s)));
@@ -507,7 +521,7 @@ async function syncDown(first) {
     const rm = await pull();
     if (!rm.exists) { syDirty = true; await flushSync(); return; }
     if (rm.sha !== SY.sha) {
-      if (first && !SY.sha && !confirm('Já existem dados salvos na nuvem.\n\nOK = usar os dados da nuvem\nCancelar = enviar os dados deste aparelho para a nuvem')) {
+      if (first && !SY.sha && HAD_LOCAL && !confirm('Já existem dados salvos na nuvem.\n\nOK = usar os dados da nuvem\nCancelar = enviar os dados deste aparelho para a nuvem')) {
         SY.sha = rm.sha; syDirty = true; await flushSync(); return;
       }
       applyRemote(rm);
@@ -556,7 +570,8 @@ function renderConfig() {
       <div><label>Repositório de dados (dono/nome)</label><input data-sy="repo" value="${esc(SY.repo)}" autocomplete="off"></div>
       <div><label>Token de acesso (GitHub)</label><input data-sy="token" type="password" value="${esc(SY.token)}" placeholder="github_pat_…" autocomplete="off"></div>
     </div>
-    <div class="bar"><button class="btn pri" id="syConnect">${SY.token && SY.sha ? 'Sincronizar agora' : 'Conectar e sincronizar'}</button>${SY.token ? '<button class="btn" id="syOff">Desconectar este aparelho</button>' : ''}</div>
+    <div class="bar"><button class="btn pri" id="syConnect">${SY.token && SY.sha ? 'Sincronizar agora' : 'Conectar e sincronizar'}</button>${SY.token ? '<button class="btn" id="syLink">Copiar link para outro aparelho</button><button class="btn" id="syOff">Desconectar este aparelho</button>' : ''}</div>
+    ${SY.token ? '<p class="hint">📱 <b>Celular/outro computador:</b> clique em “Copiar link para outro aparelho”, mande o link para você mesmo (WhatsApp, e-mail) e abra lá — conecta sozinho, sem digitar nada. O link contém seu token: não compartilhe com ninguém.</p>' : ''}
     <details><summary class="hint" style="cursor:pointer">Como criar o token (1 minuto)</summary>
       <ol class="hint">
         <li>Abra <b>github.com/settings/personal-access-tokens/new</b></li>
