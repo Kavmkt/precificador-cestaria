@@ -56,7 +56,7 @@ function seed() {
 let S;
 try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
 if (!S || !S.settings) S = seed();
-const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('Não foi possível salvar neste navegador'); } };
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('Não foi possível salvar neste navegador'); } scheduleSync(); };
 
 /* ---------- Cálculo ---------- */
 const unitCost = i => i && i.qtd > 0 ? i.preco / i.qtd : 0;
@@ -340,6 +340,7 @@ app.addEventListener('input', e => {
     const uc = $(`[data-uc="${i.id}"]`); if (uc) uc.textContent = `${brl(unitCost(i))} / ${i.un}`;
   }
   if (tab === 'config' && t.dataset.s) { S.settings[t.dataset.s] = num(t.value); save(); }
+  if (tab === 'config' && t.dataset.sy) { SY[t.dataset.sy] = t.value.trim(); if (t.dataset.sy !== 'token') SY.sha = null; saveSY(); }
   if (t.id === 'fq') { filtro.q = t.value; renderListaInsumos(); }
 });
 app.addEventListener('change', e => {
@@ -379,7 +380,13 @@ app.addEventListener('click', e => {
     }
   }
   if (tab === 'config') {
-    if (b.id === 'exp') {
+    if (b.id === 'syConnect') {
+      if (!SY.token || !/^[\w.-]+\/[\w.-]+$/.test(SY.repo)) { toast('Preencha o repositório (dono/nome) e o token'); return; }
+      SY.sha = null; saveSY(); syDirty = false; syBusy = false; syncDown(true).then(() => { renderConfig(); if ($('#sy').className === 'ok') toast('Sincronização ativada ✓'); });
+    } else if (b.id === 'syOff') {
+      if (!confirm('Desconectar este aparelho da nuvem? Os dados continuam salvos aqui e no GitHub.')) return;
+      SY.token = ''; SY.sha = null; saveSY(); setSy('off'); renderConfig();
+    } else if (b.id === 'exp') {
       const url = URL.createObjectURL(new Blob([JSON.stringify(S, null, 2)], { type: 'application/json' }));
       const a = document.createElement('a'); a.href = url; a.download = `precificador-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url);
     } else if (b.id === 'imp') $('#impFile').click();
@@ -425,6 +432,95 @@ function renderListaInsumos() {
     </div>`).join('') : '<div class="empty">Nenhum insumo encontrado.</div>';
 }
 
+/* ---------- Sincronização com GitHub (repositório privado de dados) ---------- */
+const SYNC_KEY = 'precificador-sync-v1';
+let SY = null;
+try { SY = JSON.parse(localStorage.getItem(SYNC_KEY)); } catch (e) { SY = null; }
+SY = Object.assign({ repo: 'Kavmkt/precificador-dados', path: 'data.json', token: '', sha: null }, SY || {});
+const saveSY = () => { try { localStorage.setItem(SYNC_KEY, JSON.stringify(SY)); } catch (e) { /* sem storage */ } };
+let syTimer, syDirty = false, syBusy = false;
+
+const b64enc = s => btoa(unescape(encodeURIComponent(s)));
+const b64dec = s => decodeURIComponent(escape(atob(s.replace(/\s/g, ''))));
+function setSy(state, msg) {
+  const el = $('#sy'); if (!el) return;
+  const map = { off: ['☁ local', 'Sincronização desligada — dados só neste navegador'], pending: ['☁ …', 'Alterações aguardando envio'], saving: ['☁ salvando…', ''], ok: ['☁ salvo ✓', 'Sincronizado com o GitHub'], err: ['☁ erro ⚠', msg || ''] };
+  el.textContent = map[state][0]; el.title = map[state][1]; el.className = state;
+}
+async function ghApi(method, body) {
+  const r = await fetch(`https://api.github.com/repos/${SY.repo}/contents/${SY.path}` + (method === 'GET' ? `?t=${Date.now()}` : ''), {
+    method, cache: 'no-store',
+    headers: { Authorization: 'Bearer ' + SY.token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  if (r.status === 401 || r.status === 403) throw new Error('Token inválido ou sem permissão (Contents: leitura e escrita).');
+  return r;
+}
+async function pull() {
+  const r = await ghApi('GET');
+  if (r.status === 404) {
+    const repoOk = await fetch(`https://api.github.com/repos/${SY.repo}`, { headers: { Authorization: 'Bearer ' + SY.token } });
+    if (!repoOk.ok) throw new Error('Repositório não encontrado ou sem acesso: ' + SY.repo);
+    return { exists: false };
+  }
+  if (!r.ok) throw new Error('GitHub respondeu ' + r.status);
+  const j = await r.json();
+  const data = JSON.parse(b64dec(j.content));
+  if (!data.settings || !Array.isArray(data.insumos) || !Array.isArray(data.produtos)) throw new Error('data.json inválido no repositório.');
+  return { exists: true, sha: j.sha, data };
+}
+function applyRemote(rm) {
+  S = rm.data; SY.sha = rm.sha; saveSY();
+  try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ }
+  syDirty = false; render();
+}
+async function push(retry = true) {
+  const r = await ghApi('PUT', { message: 'Atualiza dados', content: b64enc(JSON.stringify(S, null, 1)), ...(SY.sha ? { sha: SY.sha } : {}) });
+  if ((r.status === 409 || r.status === 422) && retry) {
+    const rm = await pull();
+    if (rm.exists && rm.sha !== SY.sha) {
+      if (confirm('Os dados na nuvem foram alterados em outro aparelho.\n\nOK = usar os dados da nuvem (descarta as alterações feitas aqui)\nCancelar = sobrescrever a nuvem com os dados deste aparelho')) { applyRemote(rm); return; }
+      SY.sha = rm.sha;
+    } else if (!rm.exists) SY.sha = null;
+    return push(false);
+  }
+  if (!r.ok) throw new Error('Falha ao salvar (' + r.status + ')');
+  SY.sha = (await r.json()).content.sha; saveSY();
+}
+function scheduleSync() {
+  if (!SY.token) return;
+  syDirty = true; setSy('pending');
+  clearTimeout(syTimer); syTimer = setTimeout(flushSync, 1500);
+}
+async function flushSync() {
+  if (!SY.token || !syDirty) return;
+  if (syBusy) { syTimer = setTimeout(flushSync, 800); return; }
+  syBusy = true; syDirty = false; setSy('saving');
+  try { await push(); setSy(syDirty ? 'pending' : 'ok'); }
+  catch (e) { syDirty = true; setSy('err', e.message); }
+  finally { syBusy = false; }
+}
+async function syncDown(first) {
+  if (!SY.token || syDirty || syBusy) return;
+  setSy('saving');
+  try {
+    const rm = await pull();
+    if (!rm.exists) { syDirty = true; await flushSync(); return; }
+    if (rm.sha !== SY.sha) {
+      if (first && !SY.sha && !confirm('Já existem dados salvos na nuvem.\n\nOK = usar os dados da nuvem\nCancelar = enviar os dados deste aparelho para a nuvem')) {
+        SY.sha = rm.sha; syDirty = true; await flushSync(); return;
+      }
+      applyRemote(rm);
+    }
+    setSy('ok');
+  } catch (e) { setSy('err', e.message); if (first) toast(e.message); }
+}
+$('#sy').addEventListener('click', () => { tab = 'config'; $$('#tabs button').forEach(x => x.classList.toggle('on', x.dataset.tab === 'config')); render(); });
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushSync(); else syncDown(false); });
+window.addEventListener('beforeunload', e => { if (syDirty) { e.preventDefault(); e.returnValue = ''; } });
+setSy(SY.token ? 'ok' : 'off');
+if (SY.token) syncDown(!SY.sha);
+
 /* ---------- Aba Configurações ---------- */
 function renderConfig() {
   const s = S.settings;
@@ -454,8 +550,26 @@ function renderConfig() {
     </div>
   </div>
   <div class="card" style="margin-top:16px">
-    <h3 style="margin-top:0">Seus dados</h3>
-    <p class="hint">Tudo fica salvo apenas neste navegador/aparelho. Faça backup para não perder ou para levar para outro aparelho.</p>
+    <h3 style="margin-top:0">☁ Salvar na nuvem (GitHub)</h3>
+    <p class="hint">Seus insumos, produtos e configurações ficam num repositório <b>privado</b> seu e abrem iguais em qualquer navegador. Em cada aparelho novo, cole o token uma única vez.</p>
+    <div class="grid g2">
+      <div><label>Repositório de dados (dono/nome)</label><input data-sy="repo" value="${esc(SY.repo)}" autocomplete="off"></div>
+      <div><label>Token de acesso (GitHub)</label><input data-sy="token" type="password" value="${esc(SY.token)}" placeholder="github_pat_…" autocomplete="off"></div>
+    </div>
+    <div class="bar"><button class="btn pri" id="syConnect">${SY.token && SY.sha ? 'Sincronizar agora' : 'Conectar e sincronizar'}</button>${SY.token ? '<button class="btn" id="syOff">Desconectar este aparelho</button>' : ''}</div>
+    <details><summary class="hint" style="cursor:pointer">Como criar o token (1 minuto)</summary>
+      <ol class="hint">
+        <li>Abra <b>github.com/settings/personal-access-tokens/new</b></li>
+        <li>Nome: <i>precificador</i> · Expiração: a maior disponível (ou sem expiração)</li>
+        <li><b>Repository access → Only select repositories</b> → escolha <i>precificador-dados</i></li>
+        <li><b>Permissions → Repository permissions → Contents → Read and write</b></li>
+        <li>Generate token, copie e cole acima. O token só dá acesso a esse repositório.</li>
+      </ol>
+    </details>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h3 style="margin-top:0">Backup manual</h3>
+    <p class="hint">Opcional: uma cópia em arquivo, além da nuvem. O token nunca entra no backup.</p>
     <div class="bar">
       <button class="btn pri" id="exp">Baixar backup (.json)</button>
       <button class="btn" id="imp">Importar backup</button>

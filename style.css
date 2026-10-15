@@ -69,3 +69,6 @@ button.x:hover{color:var(--bad)}
 #toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(80px);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;opacity:0;transition:.25s;pointer-events:none;z-index:50;font-weight:600}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 @media print{.top,.bar,.filters,button{display:none!important}}
+#sy{border:1px solid var(--line);background:var(--bg);color:var(--muted);border-radius:99px;padding:5px 12px;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
+#sy.ok{color:var(--ok)}#sy.err{color:var(--bad);border-color:var(--bad)}#sy.pending,#sy.saving{color:var(--warn)}
+details ol{padding-left:20px;line-height:1.7}

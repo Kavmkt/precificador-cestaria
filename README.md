@@ -2,7 +2,7 @@
 
 Calculadora de custos e preços para cestas de presente, café da manhã, flores e produtos personalizados (incluindo impressão 3D).
 
-App 100% estático (HTML + CSS + JS, sem build e sem servidor). Os dados ficam salvos no navegador (localStorage) e podem ser exportados em backup `.json`.
+App 100% estático (HTML + CSS + JS, sem build e sem servidor). Os dados ficam no navegador (localStorage) e, opcionalmente, sincronizados com um repositório **privado** do GitHub (`precificador-dados/data.json`) via token fine-grained (Contents: read/write) colado em Configurações. Também há backup `.json` manual.
 
 ## O que calcula
 
