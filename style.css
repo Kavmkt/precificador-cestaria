@@ -72,3 +72,6 @@ button.x:hover{color:var(--bad)}
 #sy{border:1px solid var(--line);background:var(--bg);color:var(--muted);border-radius:99px;padding:5px 12px;font:inherit;font-size:12px;font-weight:700;cursor:pointer}
 #sy.ok{color:var(--ok)}#sy.err{color:var(--bad);border-color:var(--bad)}#sy.pending,#sy.saving{color:var(--warn)}
 details ol{padding-left:20px;line-height:1.7}
+.nfrow{display:grid;grid-template-columns:110px 1fr 140px;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);align-items:start}
+@media(max-width:700px){.nfrow{grid-template-columns:1fr 120px}.nfrow>:first-child{grid-column:1/-1}}
+button:disabled{opacity:.5;cursor:not-allowed}

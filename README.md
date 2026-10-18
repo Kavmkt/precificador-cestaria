@@ -11,6 +11,7 @@ App 100% estático (HTML + CSS + JS, sem build e sem servidor). Os dados ficam n
 - **Impressão 3D**: filamento (com % de falha), energia (W × horas × tarifa) e desgaste da máquina (R$/h).
 - **Mão de obra**, **rateio de custos fixos**, **perdas** e **custos extras** (frete, arte…).
 - **Preço de venda** = custo ÷ (1 − margem − taxas), com arredondamento (inteiro ou ,90), preço mínimo e lucro líquido.
+- **Nota fiscal com IA**: foto ou PDF da nota na aba Insumos; a IA (Claude ou Gemini, chave própria) lê os itens, atualiza preços existentes e adiciona os novos após revisão.
 - Copia a descrição para o cliente (WhatsApp) e o resumo de custos.
 
 ## Rodar localmente

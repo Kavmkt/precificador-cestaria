@@ -341,6 +341,11 @@ app.addEventListener('input', e => {
     const uc = $(`[data-uc="${i.id}"]`); if (uc) uc.textContent = `${brl(unitCost(i))} / ${i.un}`;
   }
   if (tab === 'config' && t.dataset.s) { S.settings[t.dataset.s] = num(t.value); save(); }
+  if (tab === 'config' && t.dataset.ai) {
+    AI[t.dataset.ai] = t.value.trim();
+    if (t.dataset.ai === 'provider') AI.model = AI_MODELS[AI.provider][0][0];
+    saveAI(); if (t.dataset.ai === 'provider') renderConfig();
+  }
   if (tab === 'config' && t.dataset.sy) { SY[t.dataset.sy] = t.value.trim(); if (t.dataset.sy !== 'token') SY.sha = null; saveSY(); }
   if (t.id === 'fq') { filtro.q = t.value; renderListaInsumos(); }
 });
@@ -385,7 +390,7 @@ app.addEventListener('click', e => {
       if (!SY.token || !/^[\w.-]+\/[\w.-]+$/.test(SY.repo)) { toast('Preencha o repositório (dono/nome) e o token'); return; }
       SY.sha = null; saveSY(); syDirty = false; syBusy = false; syncDown(true).then(() => { renderConfig(); if ($('#sy').className === 'ok') toast('Sincronização ativada ✓'); });
     } else if (b.id === 'syLink') {
-      const raw = btoa(unescape(encodeURIComponent(JSON.stringify({ repo: SY.repo, token: SY.token })))).replace(/\+/g, '-').replace(/\//g, '_');
+      const raw = btoa(unescape(encodeURIComponent(JSON.stringify({ repo: SY.repo, token: SY.token, ai: AI.key ? { provider: AI.provider, key: AI.key, model: AI.model } : undefined })))).replace(/\+/g, '-').replace(/\//g, '_');
       copiar(location.origin + location.pathname + '#sync=' + raw);
     } else if (b.id === 'syOff') {
       if (!confirm('Desconectar este aparelho da nuvem? Os dados continuam salvos aqui e no GitHub.')) return;
@@ -415,11 +420,15 @@ function renderInsumos() {
   <p class="hint">Tudo o que você compra. Informe o preço pago e a quantidade da embalagem — o custo por unidade é calculado sozinho. Ex.: filamento R$ 110 por 1000 g; fita R$ 8 por 10 m; bombom R$ 15 por 12 un.</p>
   <div class="filters">
     <button class="btn pri" id="novoIns">+ Novo insumo</button>
+    <button class="btn" id="nfBtn">📷 Importar nota fiscal</button>
+    <input type="file" id="nfFile" accept="image/*,application/pdf" hidden>
     <input id="fq" placeholder="Buscar…" value="${esc(filtro.q)}">
     <select id="fc"><option value="">Todas as categorias</option>${CATS_INSUMO.map(c => opt(c, c, filtro.cat)).join('')}</select>
   </div>
+  <div id="nfPanel"></div>
   <div class="card" id="listaIns"></div>`;
   renderListaInsumos();
+  renderNF();
 }
 function renderListaInsumos() {
   const q = filtro.q.trim().toLowerCase();
@@ -436,6 +445,172 @@ function renderListaInsumos() {
     </div>`).join('') : '<div class="empty">Nenhum insumo encontrado.</div>';
 }
 
+/* ---------- Nota fiscal com IA ---------- */
+const AI_KEY = 'precificador-ai-v1';
+let AI = null;
+try { AI = JSON.parse(localStorage.getItem(AI_KEY)); } catch (e) { AI = null; }
+AI = Object.assign({ provider: 'claude', key: '', model: 'claude-sonnet-5-5' }, AI || {});
+const saveAI = () => { try { localStorage.setItem(AI_KEY, JSON.stringify(AI)); } catch (e) { /* sem storage */ } };
+const AI_MODELS = { claude: [['claude-sonnet-5-5', 'Claude Sonnet 5.5 (mais preciso)'], ['claude-haiku-5-5', 'Claude Haiku 5.5 (mais barato)']], gemini: [['gemini-2.5-flash', 'Gemini 2.5 Flash (grátis)']] };
+
+const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+const NF_SCHEMA = {
+  type: 'object',
+  properties: {
+    data: { type: 'string', description: 'Data da compra (AAAA-MM-DD) se visível' },
+    itens: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          nome_na_nota: { type: 'string', description: 'Texto como aparece na nota' },
+          nome: { type: 'string', description: 'Nome limpo e legível em português, sem códigos' },
+          quantidade: { type: 'number' },
+          valor_unitario: { type: 'number', description: 'Preço de 1 unidade em reais (se só houver total e quantidade, divida)' },
+          categoria: { type: 'string', enum: CATS_INSUMO },
+          match_id: { type: ['string', 'null'], description: 'id do insumo cadastrado que é o MESMO produto, ou null' },
+          confianca: { type: 'string', enum: ['alta', 'media', 'baixa'] }
+        },
+        required: ['nome_na_nota', 'nome', 'quantidade', 'valor_unitario', 'categoria', 'match_id', 'confianca']
+      }
+    }
+  },
+  required: ['itens']
+};
+const nfPrompt = lista => `Você lê notas fiscais e cupons de compra de uma cestaria (cestas de presente, café da manhã, flores, personalizados e impressão 3D).
+Extraia CADA item comprado. Ignore totais, subtotais, descontos globais, troco, impostos e formas de pagamento.
+Para cada item informe: nome limpo em português (sem códigos), quantidade, valor unitário em reais, categoria e, se for o MESMO produto de um insumo já cadastrado, o id dele em match_id (senão null).
+Regras de correspondência: abreviações e caixa alta do mesmo produto contam como o mesmo (ex.: "FERRERO ROCHER T3" = "Ferrero Roche"). Tamanho, gramatura, sabor ou marca diferentes são produtos diferentes — nesse caso use null. Na dúvida, use null e confiança "baixa".
+Use ponto decimal nos números.
+Insumos já cadastrados (JSON): ${JSON.stringify(lista)}`;
+
+async function prepararArquivo(file) {
+  const toB64 = blob => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(blob); });
+  if (file.type === 'application/pdf') {
+    if (file.size > 20e6) throw new Error('PDF muito grande (máx. 20 MB).');
+    return { media: 'application/pdf', data: await toB64(file) };
+  }
+  const bmp = await createImageBitmap(file);
+  const k = Math.min(1, 1800 / Math.max(bmp.width, bmp.height));
+  const cv = document.createElement('canvas'); cv.width = Math.round(bmp.width * k); cv.height = Math.round(bmp.height * k);
+  cv.getContext('2d').drawImage(bmp, 0, 0, cv.width, cv.height);
+  return { media: 'image/jpeg', data: cv.toDataURL('image/jpeg', 0.88).split(',')[1] };
+}
+async function lerNota(file) {
+  if (!AI.key) throw new Error('Configure a chave da IA em Configurações.');
+  const { media, data } = await prepararArquivo(file);
+  const lista = S.insumos.map(i => ({ id: i.id, nome: i.nome.trim(), un: i.un, qtd_embalagem: i.qtd, preco: i.preco }));
+  const prompt = nfPrompt(lista);
+  if (AI.provider === 'gemini') {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(AI.model)}:generateContent`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': AI.key },
+      body: JSON.stringify({
+        contents: [{ parts: [{ inline_data: { mime_type: media, data } }, { text: prompt + '\n\nResponda SOMENTE com JSON neste formato: ' + JSON.stringify({ data: 'AAAA-MM-DD', itens: [{ nome_na_nota: '', nome: '', quantidade: 1, valor_unitario: 0, categoria: CATS_INSUMO[0], match_id: null, confianca: 'alta' }] }) }] }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0 }
+      })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error?.message || 'Erro da IA (' + r.status + ')');
+    const txt = j.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('') || '';
+    try { return JSON.parse(txt.replace(/^```json|```$/g, '').trim()); } catch (e) { throw new Error('A IA devolveu uma resposta ilegível. Tente outra foto.'); }
+  }
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': AI.key, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({
+      model: AI.model, max_tokens: 8000,
+      tools: [{ name: 'registrar_itens', description: 'Registra os itens lidos da nota fiscal', input_schema: NF_SCHEMA }],
+      tool_choice: { type: 'tool', name: 'registrar_itens' },
+      messages: [{ role: 'user', content: [
+        media === 'application/pdf' ? { type: 'document', source: { type: 'base64', media_type: media, data } } : { type: 'image', source: { type: 'base64', media_type: media, data } },
+        { type: 'text', text: prompt }
+      ] }]
+    })
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(r.status === 401 ? 'Chave da IA inválida.' : (j.error?.message || 'Erro da IA (' + r.status + ')'));
+  const tu = (j.content || []).find(c => c.type === 'tool_use');
+  if (!tu) throw new Error('A IA não devolveu itens. Tente outra foto.');
+  return tu.input;
+}
+
+let NF = null; // { loading, erro, data, rows }
+function nfRows(res) {
+  return (res.itens || []).filter(it => it && (it.nome || it.nome_na_nota)).map(it => {
+    let m = S.insumos.find(i => i.id === it.match_id);
+    if (!m) m = S.insumos.find(i => norm(i.nome) === norm(it.nome));
+    const preco = Math.round(num(it.valor_unitario) * 100) / 100;
+    return { inc: preco > 0, match: m ? m.id : 'new', nome: String(it.nome || it.nome_na_nota).trim(), nomeNota: it.nome_na_nota || '', cat: CATS_INSUMO.includes(it.categoria) ? it.categoria : 'Outros', preco, qtdComp: num(it.quantidade) || 1, conf: it.confianca || 'media' };
+  });
+}
+function nfDelta(r) {
+  const i = insumo(r.match); if (!i) return '';
+  const d = i.preco ? (r.preco / i.preco - 1) * 100 : 0;
+  if (Math.abs(r.preco - i.preco) < 0.005) return '<span class="hint">sem mudança</span>';
+  return `<span class="${d > 0 ? 'bad' : 'ok'}">${d > 0 ? '▲' : '▼'} ${Math.abs(d).toFixed(0)}%</span>`;
+}
+function renderNF() {
+  const el = $('#nfPanel'); if (!el) return;
+  if (!NF) { el.innerHTML = ''; return; }
+  if (NF.loading) { el.innerHTML = '<div class="card empty">🔎 Lendo a nota fiscal… (uns segundos)</div>'; return; }
+  if (NF.erro) { el.innerHTML = `<div class="card"><div class="warn">⚠ ${esc(NF.erro)}</div><div class="bar"><button class="btn" id="nfCancel">Fechar</button></div></div>`; return; }
+  const opts = [...S.insumos].sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  const nUp = NF.rows.filter(r => r.inc && r.match !== 'new').length, nAdd = NF.rows.filter(r => r.inc && r.match === 'new').length;
+  el.innerHTML = `<div class="card" style="margin-bottom:14px">
+    <h3 style="margin-top:0">Nota fiscal${NF.data ? ' · ' + esc(NF.data) : ''}</h3>
+    <p class="hint">Confira antes de aplicar: itens que já existem têm o <b>preço atualizado</b>; os demais são <b>adicionados</b>. Você pode trocar a correspondência ou corrigir nome e preço.</p>
+    ${NF.rows.length ? NF.rows.map((r, k) => {
+      const i = insumo(r.match);
+      return `<div class="nfrow">
+        <label class="toggle"><input type="checkbox" data-nf="inc" data-k="${k}" ${r.inc ? 'checked' : ''}> <span class="pill">${i ? 'Atualizar' : 'Novo'}</span></label>
+        <div><label>Na nota: ${esc(r.nomeNota)} ${r.conf === 'baixa' ? '<span class="warn">· conferir</span>' : ''}</label>
+          <select data-nf="match" data-k="${k}"><option value="new"${r.match === 'new' ? ' selected' : ''}>➕ Adicionar como novo item</option>${opts.map(o => opt(o.id, `↻ ${o.nome.trim()} (${brl(o.preco)})`, r.match)).join('')}</select>
+          ${i ? '' : `<div class="grid g2" style="margin-top:6px"><input data-nf="nome" data-k="${k}" value="${esc(r.nome)}"><select data-nf="cat" data-k="${k}">${CATS_INSUMO.map(c => opt(c, c, r.cat)).join('')}</select></div>`}
+          ${i && i.qtd !== 1 ? `<div class="hint">Atenção: este insumo é cadastrado com embalagem de ${i.qtd} ${esc(i.un)} — o preço vale pela embalagem inteira.</div>` : ''}</div>
+        <div><label>Novo preço (R$)</label>${numIn(`data-nf="preco" data-k="${k}"`, r.preco)}<div data-nfd="${k}">${nfDelta(r)}</div></div>
+      </div>`;
+    }).join('') : '<div class="empty">Nenhum item encontrado nesta foto.</div>'}
+    <div class="bar"><button class="btn pri" id="nfApply" ${NF.rows.length ? '' : 'disabled'}>Aplicar (${nUp} atualizar, ${nAdd} adicionar)</button><button class="btn" id="nfCancel">Cancelar</button></div>
+  </div>`;
+}
+function nfBind() {
+  app.addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b || tab !== 'insumos') return;
+    if (b.id === 'nfBtn') { if (!AI.key) { toast('Primeiro configure a chave da IA em Configurações'); return; } $('#nfFile').click(); }
+    else if (b.id === 'nfCancel') { NF = null; renderNF(); }
+    else if (b.id === 'nfApply') {
+      let up = 0, add = 0;
+      for (const r of NF.rows) {
+        if (!r.inc) continue;
+        const i = insumo(r.match);
+        if (i) { i.preco = r.preco; up++; }
+        else { S.insumos.unshift({ id: uid(), nome: r.nome || r.nomeNota, cat: r.cat, un: 'un', preco: r.preco, qtd: 1 }); add++; }
+      }
+      NF = null; save(); renderInsumos(); toast(`${up} preço(s) atualizado(s), ${add} item(ns) adicionado(s) ✓`);
+    }
+  });
+  app.addEventListener('change', async e => {
+    const t = e.target;
+    if (t.id === 'nfFile') {
+      const f = t.files[0]; t.value = ''; if (!f) return;
+      NF = { loading: true }; renderNF();
+      try { const res = await lerNota(f); NF = { data: res.data || '', rows: nfRows(res) }; }
+      catch (err) { NF = { erro: err.message || String(err) }; }
+      renderNF();
+    }
+  });
+  app.addEventListener('input', e => {
+    const t = e.target; if (!NF || !NF.rows || !t.dataset.nf) return;
+    const r = NF.rows[+t.dataset.k]; if (!r) return;
+    const f = t.dataset.nf;
+    if (f === 'inc') { r.inc = t.checked; renderNF(); }
+    else if (f === 'match') { r.match = t.value; r.inc = r.preco > 0; renderNF(); }
+    else if (f === 'preco') { r.preco = num(t.value); const d = $(`[data-nfd="${t.dataset.k}"]`); if (d) d.innerHTML = nfDelta(r); }
+    else r[f] = t.value;
+  });
+}
+nfBind();
+
 /* ---------- Sincronização com GitHub (repositório privado de dados) ---------- */
 const SYNC_KEY = 'precificador-sync-v1';
 let SY = null;
@@ -449,6 +624,7 @@ const saveSY = () => { try { localStorage.setItem(SYNC_KEY, JSON.stringify(SY));
   try {
     const d = JSON.parse(decodeURIComponent(escape(atob(m[1].replace(/-/g, '+').replace(/_/g, '/')))));
     if (d.token && /^[\w.-]+\/[\w.-]+$/.test(d.repo || '')) { SY.repo = d.repo; SY.token = d.token; SY.sha = null; saveSY(); }
+    if (d.ai && d.ai.key && AI_MODELS[d.ai.provider]) { AI = Object.assign(AI, { provider: d.ai.provider, key: d.ai.key, model: d.ai.model || AI_MODELS[d.ai.provider][0][0] }); saveAI(); }
   } catch (e) { /* link inválido */ }
   history.replaceState(null, '', location.pathname + location.search);
 })();
@@ -579,6 +755,22 @@ function renderConfig() {
         <li><b>Repository access → Only select repositories</b> → escolha <i>precificador-dados</i></li>
         <li><b>Permissions → Repository permissions → Contents → Read and write</b></li>
         <li>Generate token, copie e cole acima. O token só dá acesso a esse repositório.</li>
+      </ol>
+    </details>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h3 style="margin-top:0">📷 Leitura de nota fiscal (IA)</h3>
+    <p class="hint">Tire foto da nota (ou envie PDF) na aba Insumos: a IA lê os itens, atualiza o preço dos que já existem e adiciona os novos. A foto é enviada ao provedor escolhido apenas para a leitura.</p>
+    <div class="grid">
+      <div><label>Provedor</label><select data-ai="provider"><option value="claude"${AI.provider === 'claude' ? ' selected' : ''}>Claude (Anthropic) — pago, centavos por nota</option><option value="gemini"${AI.provider === 'gemini' ? ' selected' : ''}>Gemini (Google) — plano grátis</option></select></div>
+      <div><label>Modelo</label><select data-ai="model">${AI_MODELS[AI.provider].map(([v, l]) => opt(v, l, AI.model)).join('')}</select></div>
+      <div><label>Chave de API</label><input data-ai="key" type="password" value="${esc(AI.key)}" placeholder="${AI.provider === 'claude' ? 'sk-ant-…' : 'AIza…'}" autocomplete="off"></div>
+    </div>
+    <details><summary class="hint" style="cursor:pointer">Onde pegar a chave</summary>
+      <ol class="hint">
+        <li><b>Gemini (grátis):</b> entre em aistudio.google.com/apikey → <i>Create API key</i>.</li>
+        <li><b>Claude:</b> console.anthropic.com/settings/keys → <i>Create key</i>, e adicione uns US$ 5 de crédito em Billing (rendem centenas de notas). Defina um limite mensal de gasto.</li>
+        <li>A chave fica só neste aparelho. O botão “Copiar link para outro aparelho” (na seção da nuvem) leva a chave junto.</li>
       </ol>
     </details>
   </div>
