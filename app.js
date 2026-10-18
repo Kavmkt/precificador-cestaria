@@ -449,9 +449,9 @@ function renderListaInsumos() {
 const AI_KEY = 'precificador-ai-v1';
 let AI = null;
 try { AI = JSON.parse(localStorage.getItem(AI_KEY)); } catch (e) { AI = null; }
-AI = Object.assign({ provider: 'claude', key: '', model: 'claude-sonnet-5-5' }, AI || {});
+AI = Object.assign({ provider: 'openai', key: '', model: 'gpt-4o-mini' }, AI || {});
 const saveAI = () => { try { localStorage.setItem(AI_KEY, JSON.stringify(AI)); } catch (e) { /* sem storage */ } };
-const AI_MODELS = { claude: [['claude-sonnet-5-5', 'Claude Sonnet 5.5 (mais preciso)'], ['claude-haiku-5-5', 'Claude Haiku 5.5 (mais barato)']], gemini: [['gemini-2.5-flash', 'Gemini 2.5 Flash (grátis)']] };
+const AI_MODELS = { openai: [['gpt-4o-mini', 'GPT-4o mini (barato)'], ['gpt-4o', 'GPT-4o (mais preciso)']], claude: [['claude-sonnet-5-5', 'Claude Sonnet 5.5 (mais preciso)'], ['claude-haiku-5-5', 'Claude Haiku 5.5 (mais barato)']], gemini: [['gemini-2.5-flash', 'Gemini 2.5 Flash (grátis)']] };
 
 const norm = s => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
 const NF_SCHEMA = {
@@ -501,6 +501,21 @@ async function lerNota(file) {
   const { media, data } = await prepararArquivo(file);
   const lista = S.insumos.map(i => ({ id: i.id, nome: i.nome.trim(), un: i.un, qtd_embalagem: i.qtd, preco: i.preco }));
   const prompt = nfPrompt(lista);
+  if (AI.provider === 'openai') {
+    const arquivo = media === 'application/pdf'
+      ? { type: 'file', file: { filename: 'nota.pdf', file_data: `data:${media};base64,${data}` } }
+      : { type: 'image_url', image_url: { url: `data:${media};base64,${data}`, detail: 'high' } };
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + AI.key },
+      body: JSON.stringify({
+        model: AI.model, temperature: 0, response_format: { type: 'json_object' },
+        messages: [{ role: 'user', content: [arquivo, { type: 'text', text: prompt + '\n\nResponda SOMENTE com JSON neste formato: ' + JSON.stringify({ data: 'AAAA-MM-DD', itens: [{ nome_na_nota: '', nome: '', quantidade: 1, valor_unitario: 0, categoria: CATS_INSUMO[0], match_id: null, confianca: 'alta' }] }) }] }]
+      })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(r.status === 401 ? 'Chave da OpenAI inválida.' : r.status === 429 ? 'Sem créditos ou limite da OpenAI atingido.' : (j.error?.message || 'Erro da IA (' + r.status + ')'));
+    try { return JSON.parse(j.choices?.[0]?.message?.content || ''); } catch (e) { throw new Error('A IA devolveu uma resposta ilegível. Tente outra foto.'); }
+  }
   if (AI.provider === 'gemini') {
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(AI.model)}:generateContent`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': AI.key },
@@ -762,9 +777,9 @@ function renderConfig() {
     <h3 style="margin-top:0">📷 Leitura de nota fiscal (IA)</h3>
     <p class="hint">Tire foto da nota (ou envie PDF) na aba Insumos: a IA lê os itens, atualiza o preço dos que já existem e adiciona os novos. A foto é enviada ao provedor escolhido apenas para a leitura.</p>
     <div class="grid">
-      <div><label>Provedor</label><select data-ai="provider"><option value="claude"${AI.provider === 'claude' ? ' selected' : ''}>Claude (Anthropic) — pago, centavos por nota</option><option value="gemini"${AI.provider === 'gemini' ? ' selected' : ''}>Gemini (Google) — plano grátis</option></select></div>
+      <div><label>Provedor</label><select data-ai="provider"><option value="openai"${AI.provider === 'openai' ? ' selected' : ''}>OpenAI (ChatGPT) — pago, centavos por nota</option><option value="claude"${AI.provider === 'claude' ? ' selected' : ''}>Claude (Anthropic) — pago, centavos por nota</option><option value="gemini"${AI.provider === 'gemini' ? ' selected' : ''}>Gemini (Google) — plano grátis</option></select></div>
       <div><label>Modelo</label><select data-ai="model">${AI_MODELS[AI.provider].map(([v, l]) => opt(v, l, AI.model)).join('')}</select></div>
-      <div><label>Chave de API</label><input data-ai="key" type="password" value="${esc(AI.key)}" placeholder="${AI.provider === 'claude' ? 'sk-ant-…' : 'AIza…'}" autocomplete="off"></div>
+      <div><label>Chave de API</label><input data-ai="key" type="password" value="${esc(AI.key)}" placeholder="${AI.provider === 'openai' ? 'sk-proj-…' : AI.provider === 'claude' ? 'sk-ant-…' : 'AIza…'}" autocomplete="off"></div>
     </div>
     <details><summary class="hint" style="cursor:pointer">Onde pegar a chave</summary>
       <ol class="hint">
