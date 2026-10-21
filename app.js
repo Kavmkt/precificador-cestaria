@@ -96,10 +96,23 @@ function calc(p, stack = []) {
   r.custo = r.mat + r.perda + r.filamento + r.energia + r.maquina + r.mao + r.fixo + r.extras;
 
   const m = p.margem ?? st.margem, t = p.taxas ?? st.taxas;
-  const den = 1 - (num(m) + num(t)) / 100;
+  // Duas formas de aplicar a margem:
+  //  'custo' (padrão): preço = custo × (1 + margem) ÷ (1 − taxas)   → margem é % em cima do custo; taxas saem do preço final
+  //  'preco': preço = custo ÷ (1 − margem − taxas)                  → margem é % do preço de venda
+  const modo = p.modoMargem ?? st.modoMargem ?? 'custo';
+  r.modo = modo;
   r.margemPct = num(m); r.taxasPct = num(t);
-  r.valido = den > 0.01;
-  let preco = r.valido ? r.custo / den : NaN;
+  let preco;
+  if (modo === 'custo') {
+    const den = 1 - num(t) / 100;
+    r.valido = den > 0.01;
+    preco = r.valido ? r.custo * (1 + num(m) / 100) / den : NaN;
+    r.comMargem = r.custo * (1 + num(m) / 100);
+  } else {
+    const den = 1 - (num(m) + num(t)) / 100;
+    r.valido = den > 0.01;
+    preco = r.valido ? r.custo / den : NaN;
+  }
   if (isFinite(preco)) {
     if (p.arred === 'up1') preco = Math.ceil(preco - 1e-9);
     else if (p.arred === 'x90') { preco = Math.ceil(preco + 0.1 - 1e-9) - 0.1; if (preco < r.custo) preco += 1; }
@@ -235,6 +248,7 @@ function renderEditor(p) {
       <div class="grid">
         <div><label>Margem de lucro (%)</label>${numIn('data-p="margem" data-nullable', p.margem, 'padrão ' + st.margem)}</div>
         <div><label>Taxas: cartão/marketplace (%)</label>${numIn('data-p="taxas" data-nullable', p.taxas, 'padrão ' + st.taxas)}</div>
+        <div><label>Como aplicar a margem</label><select data-p="modoMargem" data-nullable><option value=""${p.modoMargem ? '' : ' selected'}>Padrão (${st.modoMargem === 'preco' ? 'sobre o preço' : 'sobre o custo'})</option><option value="custo"${p.modoMargem === 'custo' ? ' selected' : ''}>% sobre o custo</option><option value="preco"${p.modoMargem === 'preco' ? ' selected' : ''}>% do preço de venda</option></select></div>
         <div><label>Arredondamento</label><select data-p="arred">${Object.entries(ARREDONDAMENTOS).map(([k, v]) => opt(k, v, p.arred || 'none')).join('')}</select></div>
       </div>
       <label class="toggle" style="margin-top:10px"><input type="checkbox" data-p="rateio" ${p.rateio !== false ? 'checked' : ''}> Ratear custos fixos (aluguel, internet, etc.)</label>
@@ -268,7 +282,7 @@ function updateResults() {
   const r = $('#result');
   const msgs = [];
   if (c.ciclo) msgs.push('Um produto está dentro dele mesmo (referência circular).');
-  if (!c.valido) msgs.push('Margem + taxas precisam somar menos de 100%.');
+  if (!c.valido) msgs.push(c.modo === 'custo' ? 'As taxas precisam ser menores que 100%.' : 'Margem + taxas precisam somar menos de 100%.');
   if (c.semFil) msgs.push('Escolha o filamento para calcular o custo da impressão.');
   if (p.linhas.some(l => !(l.kind === 'insumo' ? insumo(l.ref) : prod(l.ref)))) msgs.push('Há itens removidos na lista.');
   r.innerHTML = `
@@ -276,6 +290,9 @@ function updateResults() {
     <div class="big">${brl(c.preco)}</div>
     <div class="hint">Lucro líquido ${brl(c.lucro)} (${isFinite(c.lucroPct) ? c.lucroPct.toFixed(1).replace('.', ',') : '—'}% do preço) · markup ${isFinite(c.markup) ? c.markup.toFixed(0) : '—'}%</div>
     ${msgs.map(m => `<div class="warn">⚠ ${esc(m)}</div>`).join('')}
+    ${c.valido ? `<div class="hint" style="margin-top:8px">${c.modo === 'custo'
+      ? `Conta: custo ${brl(c.custo)} + ${c.margemPct}% de margem = ${brl(c.comMargem)} → dividido por (1 − ${c.taxasPct}% de taxas) = ${brl(c.comMargem / (1 - c.taxasPct / 100))}${p.arred && p.arred !== 'none' ? ', depois arredondado' : ''}.`
+      : `Conta: custo ${brl(c.custo)} ÷ (1 − ${c.margemPct}% margem − ${c.taxasPct}% taxas).`}</div>` : ''}
     <div class="stack">${seg.map(s => `<span style="width:${s[1] / total * 100}%;background:${s[2]}" title="${s[0]}"></span>`).join('')}</div>
     <div class="legend">${seg.map(s => `<span><i style="background:${s[2]}"></i>${s[0]} ${(s[1] / total * 100).toFixed(0)}%</span>`).join('')}</div>
     <div style="margin-top:12px">
@@ -317,6 +334,7 @@ app.addEventListener('input', e => {
   if (tab === 'produtos' && p) {
     if (t.dataset.p) {
       let v = t.type === 'checkbox' ? t.checked : t.type === 'number' ? (t.value === '' && 'nullable' in t.dataset ? null : num(t.value)) : t.value;
+      if (v === '' && 'nullable' in t.dataset) v = null;
       setPath(p, t.dataset.p, v);
       save();
       if (t.type === 'checkbox' || t.tagName === 'SELECT') { if (t.dataset.p === 'imp.on' || t.dataset.p === 'rateio') renderEditor(p); else updateResults(); }
@@ -340,7 +358,7 @@ app.addEventListener('input', e => {
     save();
     const uc = $(`[data-uc="${i.id}"]`); if (uc) uc.textContent = `${brl(unitCost(i))} / ${i.un}`;
   }
-  if (tab === 'config' && t.dataset.s) { S.settings[t.dataset.s] = num(t.value); save(); }
+  if (tab === 'config' && t.dataset.s) { S.settings[t.dataset.s] = 'str' in t.dataset ? t.value : num(t.value); save(); }
   if (tab === 'config' && t.dataset.ai) {
     AI[t.dataset.ai] = t.value.trim();
     if (t.dataset.ai === 'provider') AI.model = AI_MODELS[AI.provider][0][0];
@@ -750,8 +768,10 @@ function renderConfig() {
     <h3>Perdas e preço</h3>
     <div class="grid">
       ${f('perda', 'Perdas e quebras de insumos (%)', 'Itens que estragam, quebram ou sobram.')}
-      ${f('margem', 'Margem de lucro padrão (%)', 'Sobre o preço de venda.')}
-      ${f('taxas', 'Taxas padrão (%)', 'Cartão, Pix, marketplace, imposto.')}
+      ${f('margem', 'Margem de lucro padrão (%)', 'Quanto você quer ganhar.')}
+      ${f('taxas', 'Taxas padrão (%)', 'iFood, cartão, Pix, imposto — saem do preço final.')}
+      <div><label>Como aplicar a margem</label><select data-s="modoMargem" data-str><option value="custo"${(s.modoMargem || 'custo') === 'custo' ? ' selected' : ''}>% sobre o custo (markup)</option><option value="preco"${s.modoMargem === 'preco' ? ' selected' : ''}>% do preço de venda</option></select>
+        <div class="hint">Sobre o custo: custo R$ 100 + 45% = R$ 145 de base. Do preço: R$ 45 de cada R$ 100 vendidos ficam de lucro — dá um preço bem mais alto.</div></div>
     </div>
   </div>
   <div class="card" style="margin-top:16px">

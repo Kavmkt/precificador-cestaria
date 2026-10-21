@@ -10,7 +10,7 @@ App 100% estático (HTML + CSS + JS, sem build e sem servidor). Os dados ficam n
 - **Produtos / cestas**: lista de insumos e até outros produtos como sub-itens (ex.: chaveiro 3D dentro de uma cesta).
 - **Impressão 3D**: filamento (com % de falha), energia (W × horas × tarifa) e desgaste da máquina (R$/h).
 - **Mão de obra**, **rateio de custos fixos**, **perdas** e **custos extras** (frete, arte…).
-- **Preço de venda** = custo ÷ (1 − margem − taxas), com arredondamento (inteiro ou ,90), preço mínimo e lucro líquido.
+- **Preço de venda**: por padrão custo × (1 + margem) ÷ (1 − taxas) (margem sobre o custo; taxas saem do preço final). Opcional: margem como % do preço de venda, custo ÷ (1 − margem − taxas). Também mostra preço mínimo, lucro líquido e arredondamento.
 - **Nota fiscal com IA**: foto ou PDF da nota na aba Insumos; a IA (Claude ou Gemini, chave própria) lê os itens, atualiza preços existentes e adiciona os novos após revisão.
 - Copia a descrição para o cliente (WhatsApp) e o resumo de custos.
 
