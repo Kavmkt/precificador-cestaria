@@ -47,7 +47,7 @@ function seed() {
     maoObraMin: 35, extras: [{ desc: 'Entrega / frete', valor: 8 }], margem: null, taxas: null, arred: 'x90', rateio: true
   };
   return {
-    settings: { hora: 20, kwh: 0.95, watts: 200, desgasteHora: 1.5, falha: 5, perda: 3, fixosMes: 600, producaoMes: 80, margem: 40, taxas: 5 },
+    settings: { hora: 20, kwh: 0.95, watts: 200, desgasteHora: 1.5, falha: 5, perda: 3, fixosMes: 600, producaoMes: 80, margem: 100, taxas: 20 },
     insumos: [pla, cesta, palha, fita, celo, bolo, choc, suco, rosa, cartao, chav],
     produtos: [cafe, chaveiro],
     sel: cafe.id
@@ -113,11 +113,11 @@ function calc(p, stack = []) {
     r.valido = den > 0.01;
     preco = r.valido ? r.custo / den : NaN;
   }
-  if (isFinite(preco)) {
-    if (p.arred === 'up1') preco = Math.ceil(preco - 1e-9);
-    else if (p.arred === 'x90') { preco = Math.ceil(preco + 0.1 - 1e-9) - 0.1; if (preco < r.custo) preco += 1; }
-  }
-  r.preco = preco;
+  const arr = v => !isFinite(v) ? v : p.arred === 'up1' ? Math.ceil(v - 1e-9) : p.arred === 'x90' ? Math.ceil(v + 0.1 - 1e-9) - 0.1 : v;
+  r.precoTabela = arr(preco);
+  r.desconto = Math.min(Math.max(num(p.desconto), 0), 100);
+  preco = r.desconto > 0 ? arr(r.precoTabela * (1 - r.desconto / 100)) : r.precoTabela;
+  r.preco = preco; // preço final cobrado do cliente (já com desconto)
   r.taxasVal = isFinite(preco) ? preco * num(t) / 100 : NaN;
   r.lucro = isFinite(preco) ? preco - r.custo - r.taxasVal : NaN;
   r.lucroPct = isFinite(preco) && preco > 0 ? r.lucro / preco * 100 : NaN;
@@ -246,7 +246,8 @@ function renderEditor(p) {
 
     <div class="sec"><h3>Preço de venda</h3>
       <div class="grid">
-        <div><label>Margem de lucro (%)</label>${numIn('data-p="margem" data-nullable', p.margem, 'padrão ' + st.margem)}</div>
+        <div><label>Lucro sobre o custo (%) · 100 = dobro</label>${numIn('data-p="margem" data-nullable', p.margem, 'padrão ' + st.margem)}</div>
+        <div><label>Desconto ao cliente (%)</label>${numIn('data-p="desconto"', p.desconto || '', '0')}</div>
         <div><label>Taxas: cartão/marketplace (%)</label>${numIn('data-p="taxas" data-nullable', p.taxas, 'padrão ' + st.taxas)}</div>
         <div><label>Como aplicar a margem</label><select data-p="modoMargem" data-nullable><option value=""${p.modoMargem ? '' : ' selected'}>Padrão (${st.modoMargem === 'preco' ? 'sobre o preço' : 'sobre o custo'})</option><option value="custo"${p.modoMargem === 'custo' ? ' selected' : ''}>% sobre o custo</option><option value="preco"${p.modoMargem === 'preco' ? ' selected' : ''}>% do preço de venda</option></select></div>
         <div><label>Arredondamento</label><select data-p="arred">${Object.entries(ARREDONDAMENTOS).map(([k, v]) => opt(k, v, p.arred || 'none')).join('')}</select></div>
@@ -286,8 +287,10 @@ function updateResults() {
   if (c.semFil) msgs.push('Escolha o filamento para calcular o custo da impressão.');
   if (p.linhas.some(l => !(l.kind === 'insumo' ? insumo(l.ref) : prod(l.ref)))) msgs.push('Há itens removidos na lista.');
   r.innerHTML = `
-    <label>Preço de venda sugerido</label>
+    <label>${c.desconto > 0 ? `Preço com ${c.desconto}% de desconto` : 'Preço de venda sugerido'}</label>
     <div class="big">${brl(c.preco)}</div>
+    ${c.desconto > 0 ? `<div class="hint">Preço de tabela: <s>${brl(c.precoTabela)}</s></div>` : ''}
+    ${c.lucro < 0 ? '<div class="warn">⚠ Com esse desconto você teria prejuízo.</div>' : ''}
     <div class="hint">Lucro líquido ${brl(c.lucro)} (${isFinite(c.lucroPct) ? c.lucroPct.toFixed(1).replace('.', ',') : '—'}% do preço) · markup ${isFinite(c.markup) ? c.markup.toFixed(0) : '—'}%</div>
     ${msgs.map(m => `<div class="warn">⚠ ${esc(m)}</div>`).join('')}
     ${c.valido ? `<div class="hint" style="margin-top:8px">${c.modo === 'custo'
@@ -318,7 +321,7 @@ function textoCliente(p, c) {
     const un = l.kind === 'insumo' && o.un !== 'un' ? ' ' + o.un : '';
     return `• ${q > 1 && !un ? q + 'x ' : (un ? q + un + ' de ' : '')}${o.nome.replace(/\s*\(.*\)\s*$/, '')}`;
   }).filter(Boolean);
-  return `*${p.nome}*\n${itens.join('\n')}\n\nValor: *${brl(c.preco)}*`;
+  return `*${p.nome}*\n${itens.join('\n')}\n\n${c.desconto > 0 ? `De ${brl(c.precoTabela)} por ` : 'Valor: '}*${brl(c.preco)}*`;
 }
 function textoCusto(p, c) {
   return `${p.nome}\nMateriais: ${brl(c.mat + c.perda)}\n3D: ${brl(c.filamento + c.energia + c.maquina)}\nMão de obra: ${brl(c.mao)}\nFixos: ${brl(c.fixo)}\nExtras: ${brl(c.extras)}\nCUSTO: ${brl(c.custo)}\nPREÇO: ${brl(c.preco)} (margem ${c.margemPct}% + taxas ${c.taxasPct}%)\nLucro: ${brl(c.lucro)}`;
@@ -768,7 +771,7 @@ function renderConfig() {
     <h3>Perdas e preço</h3>
     <div class="grid">
       ${f('perda', 'Perdas e quebras de insumos (%)', 'Itens que estragam, quebram ou sobram.')}
-      ${f('margem', 'Margem de lucro padrão (%)', 'Quanto você quer ganhar.')}
+      ${f('margem', 'Lucro sobre o custo padrão (%)', '100 = lucrar o mesmo valor do custo (preço base = dobro). 50 = lucrar metade do custo.')}
       ${f('taxas', 'Taxas padrão (%)', 'iFood, cartão, Pix, imposto — saem do preço final.')}
       <div><label>Como aplicar a margem</label><select data-s="modoMargem" data-str><option value="custo"${(s.modoMargem || 'custo') === 'custo' ? ' selected' : ''}>% sobre o custo (markup)</option><option value="preco"${s.modoMargem === 'preco' ? ' selected' : ''}>% do preço de venda</option></select>
         <div class="hint">Sobre o custo: custo R$ 100 + 45% = R$ 145 de base. Do preço: R$ 45 de cada R$ 100 vendidos ficam de lucro — dá um preço bem mais alto.</div></div>
