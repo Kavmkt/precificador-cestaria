@@ -75,3 +75,7 @@ details ol{padding-left:20px;line-height:1.7}
 .nfrow{display:grid;grid-template-columns:110px 1fr 140px;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);align-items:start}
 @media(max-width:700px){.nfrow{grid-template-columns:1fr 120px}.nfrow>:first-child{grid-column:1/-1}}
 button:disabled{opacity:.5;cursor:not-allowed}
+.site{margin:12px 0 4px;padding:12px;border:2px solid var(--accent);border-radius:12px;background:var(--accent-soft)}
+.site label{color:var(--accent)}
+.big2{font-size:30px;font-weight:800;line-height:1.1;color:var(--ink)}
+.site .btn{margin-top:8px;width:100%}

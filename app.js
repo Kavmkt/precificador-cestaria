@@ -118,6 +118,13 @@ function calc(p, stack = []) {
   r.desconto = Math.min(Math.max(num(p.desconto), 0), 100);
   preco = r.desconto > 0 ? arr(r.precoTabela * (1 - r.desconto / 100)) : r.precoTabela;
   r.preco = preco; // preço final cobrado do cliente (já com desconto)
+  // Preço para o site/e-commerce: mesma margem, mas sem a taxa do marketplace (usa só "taxas do site", padrão 0%)
+  const ts = num(st.taxasSite);
+  const denSite = modo === 'custo' ? 1 - ts / 100 : 1 - (num(m) + ts) / 100;
+  const baseSite = denSite > 0.01 ? (modo === 'custo' ? r.custo * (1 + num(m) / 100) : r.custo) / denSite : NaN;
+  r.precoSiteTabela = arr(baseSite);
+  r.precoSite = r.desconto > 0 ? arr(r.precoSiteTabela * (1 - r.desconto / 100)) : r.precoSiteTabela;
+  r.lucroSite = isFinite(r.precoSite) ? r.precoSite - r.custo - r.precoSite * ts / 100 : NaN;
   r.taxasVal = isFinite(preco) ? preco * num(t) / 100 : NaN;
   r.lucro = isFinite(preco) ? preco - r.custo - r.taxasVal : NaN;
   r.lucroPct = isFinite(preco) && preco > 0 ? r.lucro / preco * 100 : NaN;
@@ -291,6 +298,14 @@ function updateResults() {
     <div class="big">${brl(c.preco)}</div>
     ${c.desconto > 0 ? `<div class="hint">Preço de tabela: <s>${brl(c.precoTabela)}</s></div>` : ''}
     ${c.lucro < 0 ? '<div class="warn">⚠ Com esse desconto você teria prejuízo.</div>' : ''}
+    <button class="btn" data-copy="${isFinite(c.preco) ? c.preco.toFixed(2).replace('.', ',') : ''}" style="margin-top:6px">Copiar ${brl(c.preco)}</button>
+    <div class="site">
+      <label>🌐 Preço para o site (sem as taxas do iFood)</label>
+      <div class="big2">${brl(c.precoSite)}</div>
+      ${c.desconto > 0 ? `<div class="hint">Preço de tabela no site: <s>${brl(c.precoSiteTabela)}</s></div>` : ''}
+      <div class="hint">Mesmo lucro, sem os ${c.taxasPct}% do iFood${num(S.settings.taxasSite) ? ` (só ${num(S.settings.taxasSite)}% de taxas do site)` : ''}. Lucro líquido: ${brl(c.lucroSite)}.</div>
+      <button class="btn pri" data-copy="${isFinite(c.precoSite) ? c.precoSite.toFixed(2).replace('.', ',') : ''}">Copiar ${isFinite(c.precoSite) ? c.precoSite.toFixed(2).replace('.', ',') : '—'} para o site</button>
+    </div>
     <div class="hint">Lucro líquido ${brl(c.lucro)} (${isFinite(c.lucroPct) ? c.lucroPct.toFixed(1).replace('.', ',') : '—'}% do preço) · markup ${isFinite(c.markup) ? c.markup.toFixed(0) : '—'}%</div>
     ${msgs.map(m => `<div class="warn">⚠ ${esc(m)}</div>`).join('')}
     ${c.valido ? `<div class="hint" style="margin-top:8px">${c.modo === 'custo'
@@ -377,6 +392,7 @@ app.addEventListener('change', e => {
 });
 app.addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.copy) { copiar(b.dataset.copy); return; }
   const p = prod(S.sel);
   if (tab === 'produtos' && p) {
     if (b.id === 'addLinha') {
@@ -772,7 +788,8 @@ function renderConfig() {
     <div class="grid">
       ${f('perda', 'Perdas e quebras de insumos (%)', 'Itens que estragam, quebram ou sobram.')}
       ${f('margem', 'Lucro sobre o custo padrão (%)', '100 = lucrar o mesmo valor do custo (preço base = dobro). 50 = lucrar metade do custo.')}
-      ${f('taxas', 'Taxas padrão (%)', 'iFood, cartão, Pix, imposto — saem do preço final.')}
+      ${f('taxas', 'Taxas padrão — iFood (%)', 'iFood, cartão, Pix, imposto — saem do preço final.')}
+      ${f('taxasSite', 'Taxas do site (%)', 'Usadas só no preço do site. Deixe 0 se não houver (ou ponha a taxa do cartão/Pix da loja).')}
       <div><label>Como aplicar a margem</label><select data-s="modoMargem" data-str><option value="custo"${(s.modoMargem || 'custo') === 'custo' ? ' selected' : ''}>% sobre o custo (markup)</option><option value="preco"${s.modoMargem === 'preco' ? ' selected' : ''}>% do preço de venda</option></select>
         <div class="hint">Sobre o custo: custo R$ 100 + 45% = R$ 145 de base. Do preço: R$ 45 de cada R$ 100 vendidos ficam de lucro — dá um preço bem mais alto.</div></div>
     </div>
