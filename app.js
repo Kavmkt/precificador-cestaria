@@ -44,7 +44,7 @@ function seed() {
       { kind: 'insumo', ref: cartao.id, qtd: 1 }, { kind: 'produto', ref: chaveiro.id, qtd: 1 }
     ],
     imp: { on: false, gramas: 0, horas: 0, fil: pla.id, watts: null, falha: null },
-    maoObraMin: 35, extras: [{ desc: 'Entrega / frete', valor: 8 }], margem: null, taxas: null, arred: 'x90', rateio: true
+    maoObraMin: 35, extras: [], adicionais: [{ desc: 'Entrega / frete', valor: 8 }], margem: null, taxas: null, arred: 'x90', rateio: true
   };
   return {
     settings: { hora: 20, kwh: 0.95, watts: 200, desgasteHora: 1.5, falha: 5, perda: 3, fixosMes: 600, producaoMes: 80, margem: 100, taxas: 20 },
@@ -53,10 +53,21 @@ function seed() {
     sel: cafe.id
   };
 }
+/* Migração: "frete/entrega" que estava em custos extras passa para "somado no final" (não leva lucro nem taxas). */
+function migrate(d) {
+  for (const p of d.produtos || []) {
+    p.adicionais = p.adicionais || [];
+    const keep = [];
+    for (const e of p.extras || []) (/frete|entrega/i.test(e.desc || '') ? p.adicionais : keep).push(e);
+    p.extras = keep;
+  }
+  return d;
+}
 let S;
 let HAD_LOCAL = false;
 try { HAD_LOCAL = !!localStorage.getItem(KEY); S = JSON.parse(localStorage.getItem(KEY)); } catch (e) { S = null; }
 if (!S || !S.settings) S = seed();
+migrate(S);
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast('Não foi possível salvar neste navegador'); } scheduleSync(); };
 
 /* ---------- Cálculo ---------- */
@@ -130,6 +141,11 @@ function calc(p, stack = []) {
   r.lucroPct = isFinite(preco) && preco > 0 ? r.lucro / preco * 100 : NaN;
   r.markup = isFinite(preco) && r.custo > 0 ? (preco / r.custo - 1) * 100 : NaN;
   r.minimo = r.custo / (1 - num(t) / 100); // preço sem lucro (só cobre custo + taxas)
+  // Valores somados NO FINAL (frete/entrega): repassados ao cliente, sem margem, taxas nem desconto.
+  r.adic = (p.adicionais || []).reduce((a, e) => a + num(e.valor), 0);
+  r.precoProduto = r.preco;
+  for (const k of ['preco', 'precoTabela', 'precoSite', 'precoSiteTabela']) r[k] += r.adic;
+  r.minimo += r.adic;
   return r;
 }
 
@@ -171,7 +187,7 @@ function renderProdutos() {
     <section id="editor">${cur ? '' : '<div class="card empty">Crie seu primeiro produto para começar.</div>'}</section>
   </div>`;
   $('#novoProd').onclick = () => {
-    const p = { id: uid(), nome: 'Novo produto', cat: 'Cesta de presente', linhas: [], imp: { on: false, gramas: 0, horas: 0, fil: S.insumos.find(i => i.cat === 'Filamento 3D')?.id || '', watts: null, falha: null }, maoObraMin: 0, extras: [], margem: null, taxas: null, arred: 'none', rateio: true };
+    const p = { id: uid(), nome: 'Novo produto', cat: 'Cesta de presente', linhas: [], imp: { on: false, gramas: 0, horas: 0, fil: S.insumos.find(i => i.cat === 'Filamento 3D')?.id || '', watts: null, falha: null }, maoObraMin: 0, extras: [], adicionais: [], margem: null, taxas: null, arred: 'none', rateio: true };
     S.produtos.unshift(p); S.sel = p.id; save(); renderProdutos();
   };
   renderLista();
@@ -213,6 +229,10 @@ function renderEditor(p) {
       <div><span class="un">${esc(un)}</span><div class="sub" data-sub="${idx}"></div></div>
       <button class="x" data-del-line="${idx}" title="Remover">✕</button></div>`;
   }).join('');
+  const adicHtml = (p.adicionais || []).map((x, idx) => `<div class="extra">
+      <input placeholder="Descrição (ex.: frete)" value="${esc(x.desc)}" data-adic="${idx}" data-f="desc">
+      ${numIn(`data-adic="${idx}" data-f="valor"`, x.valor, 'R$')}
+      <button class="x" data-del-adic="${idx}" title="Remover">✕</button></div>`).join('');
   const extrasHtml = (p.extras || []).map((x, idx) => `<div class="extra">
       <input placeholder="Descrição (ex.: frete)" value="${esc(x.desc)}" data-extra="${idx}" data-f="desc">
       ${numIn(`data-extra="${idx}" data-f="valor"`, x.valor, 'R$')}
@@ -248,7 +268,14 @@ function renderEditor(p) {
       <div class="grid"><div><label>Tempo de montagem / acabamento (min)</label>${numIn('data-p="maoObraMin"', p.maoObraMin)}</div></div>
       <p class="hint">Só o seu tempo ativo — o tempo da impressora rodando sozinha não entra aqui.</p>
       ${extrasHtml}
-      <div class="bar"><button class="btn" id="addExtra">+ Custo extra (frete, taxa, arte…)</button></div>
+      <div class="bar"><button class="btn" id="addExtra">+ Custo extra (arte, embalagem especial…)</button></div>
+      <p class="hint">Custos extras entram no custo — recebem lucro e taxas.</p>
+    </div>
+
+    <div class="sec"><h3>Somado no final do preço (frete, entrega)</h3>
+      <p class="hint">Valores que o cliente paga <b>por cima</b> do preço: entram só no final, sem lucro, sem taxas e sem desconto. Ex.: preço R$ 100 + frete R$ 20 = R$ 120.</p>
+      ${adicHtml}
+      <div class="bar"><button class="btn" id="addAdic">+ Frete / valor no final</button></div>
     </div>
 
     <div class="sec"><h3>Preço de venda</h3>
@@ -284,6 +311,7 @@ function updateResults() {
     ['Custos fixos', c.fixo, 'var(--c5)'],
     ['Extras', c.extras, 'var(--c4)'],
     ['Taxas', isFinite(c.taxasVal) ? c.taxasVal : 0, 'var(--c6)'],
+    ['Frete no final', c.adic, 'var(--muted)'],
     ['Lucro', isFinite(c.lucro) ? Math.max(c.lucro, 0) : 0, 'var(--c7)']
   ];
   const total = seg.reduce((a, s) => a + s[1], 0) || 1;
@@ -297,12 +325,14 @@ function updateResults() {
     <label>${c.desconto > 0 ? `Preço com ${c.desconto}% de desconto` : 'Preço de venda sugerido'}</label>
     <div class="big">${brl(c.preco)}</div>
     ${c.desconto > 0 ? `<div class="hint">Preço de tabela: <s>${brl(c.precoTabela)}</s></div>` : ''}
+    ${c.adic ? `<div class="hint">Inclui ${brl(c.adic)} somados no final (${esc((p.adicionais || []).filter(x => num(x.valor)).map(x => x.desc || 'extra').join(', '))}). Produto sem frete: ${brl(c.precoProduto)}.</div>` : ''}
     ${c.lucro < 0 ? '<div class="warn">⚠ Com esse desconto você teria prejuízo.</div>' : ''}
     <button class="btn" data-copy="${isFinite(c.preco) ? c.preco.toFixed(2).replace('.', ',') : ''}" style="margin-top:6px">Copiar ${brl(c.preco)}</button>
     <div class="site">
       <label>🌐 Preço para o site (sem as taxas do iFood)</label>
       <div class="big2">${brl(c.precoSite)}</div>
       ${c.desconto > 0 ? `<div class="hint">Preço de tabela no site: <s>${brl(c.precoSiteTabela)}</s></div>` : ''}
+      ${c.adic ? `<div class="hint">Já com ${brl(c.adic)} de frete somado no final.</div>` : ''}
       <div class="hint">Mesmo lucro, sem os ${c.taxasPct}% do iFood${num(S.settings.taxasSite) ? ` (só ${num(S.settings.taxasSite)}% de taxas do site)` : ''}. Lucro líquido: ${brl(c.lucroSite)}.</div>
       <button class="btn pri" data-copy="${isFinite(c.precoSite) ? c.precoSite.toFixed(2).replace('.', ',') : ''}">Copiar ${isFinite(c.precoSite) ? c.precoSite.toFixed(2).replace('.', ',') : '—'} para o site</button>
     </div>
@@ -324,6 +354,7 @@ function updateResults() {
       ${c.extras ? `<div class="kv"><span>Extras</span><span>${brl(c.extras)}</span></div>` : ''}
       <div class="kv tot"><span>Custo total</span><span>${brl(c.custo)}</span></div>
       <div class="kv"><span>Preço mínimo (lucro zero)</span><span>${brl(c.minimo)}</span></div>
+      ${c.adic ? `<div class="kv"><span>Somado no final (frete)</span><span>+ ${brl(c.adic)}</span></div>` : ''}
     </div>
     <div class="bar"><button class="btn pri" id="cpDesc">Copiar descrição p/ cliente</button><button class="btn" id="cpCusto">Copiar resumo de custos</button></div>`;
   renderLista();
@@ -339,7 +370,7 @@ function textoCliente(p, c) {
   return `*${p.nome}*\n${itens.join('\n')}\n\n${c.desconto > 0 ? `De ${brl(c.precoTabela)} por ` : 'Valor: '}*${brl(c.preco)}*`;
 }
 function textoCusto(p, c) {
-  return `${p.nome}\nMateriais: ${brl(c.mat + c.perda)}\n3D: ${brl(c.filamento + c.energia + c.maquina)}\nMão de obra: ${brl(c.mao)}\nFixos: ${brl(c.fixo)}\nExtras: ${brl(c.extras)}\nCUSTO: ${brl(c.custo)}\nPREÇO: ${brl(c.preco)} (margem ${c.margemPct}% + taxas ${c.taxasPct}%)\nLucro: ${brl(c.lucro)}`;
+  return `${p.nome}\nMateriais: ${brl(c.mat + c.perda)}\n3D: ${brl(c.filamento + c.energia + c.maquina)}\nMão de obra: ${brl(c.mao)}\nFixos: ${brl(c.fixo)}\nExtras: ${brl(c.extras)}\nCUSTO: ${brl(c.custo)}\nPREÇO: ${brl(c.preco)} (margem ${c.margemPct}% + taxas ${c.taxasPct}%)${c.adic ? `\nFrete somado no final: ${brl(c.adic)}` : ''}\nLucro: ${brl(c.lucro)}`;
 }
 async function copiar(txt) {
   try { await navigator.clipboard.writeText(txt); toast('Copiado!'); }
@@ -363,6 +394,10 @@ app.addEventListener('input', e => {
       else if (t.value) { const [k, id] = t.value.split(':'); l.kind = k === 'i' ? 'insumo' : 'produto'; l.ref = id; }
       save();
       if (t.dataset.f === 'ref') renderEditor(p); else updateResults();
+    } else if (t.dataset.adic !== undefined) {
+      const x = p.adicionais[+t.dataset.adic];
+      x[t.dataset.f] = t.dataset.f === 'valor' ? num(t.value) : t.value;
+      save(); updateResults();
     } else if (t.dataset.extra !== undefined) {
       const x = p.extras[+t.dataset.extra];
       x[t.dataset.f] = t.dataset.f === 'valor' ? num(t.value) : t.value;
@@ -399,6 +434,8 @@ app.addEventListener('click', e => {
       const first = S.insumos[0]; if (!first) { toast('Cadastre insumos primeiro'); return; }
       p.linhas.push({ kind: 'insumo', ref: first.id, qtd: 1 }); save(); renderEditor(p);
     } else if (b.dataset.delLine !== undefined) { p.linhas.splice(+b.dataset.delLine, 1); save(); renderEditor(p); }
+    else if (b.id === 'addAdic') { (p.adicionais ||= []).push({ desc: 'Frete', valor: 0 }); save(); renderEditor(p); }
+    else if (b.dataset.delAdic !== undefined) { p.adicionais.splice(+b.dataset.delAdic, 1); save(); renderEditor(p); }
     else if (b.id === 'addExtra') { p.extras.push({ desc: '', valor: 0 }); save(); renderEditor(p); }
     else if (b.dataset.delExtra !== undefined) { p.extras.splice(+b.dataset.delExtra, 1); save(); renderEditor(p); }
     else if (b.id === 'dupProd') { const n = JSON.parse(JSON.stringify(p)); n.id = uid(); n.nome += ' (cópia)'; S.produtos.unshift(n); S.sel = n.id; save(); renderProdutos(); }
@@ -446,7 +483,7 @@ app.addEventListener('change', e => {
   f.text().then(t => {
     const d = JSON.parse(t);
     if (!d.settings || !Array.isArray(d.insumos) || !Array.isArray(d.produtos)) throw 0;
-    S = d; save(); toast('Backup importado'); renderConfig();
+    S = migrate(d); save(); toast('Backup importado'); renderConfig();
   }).catch(() => toast('Arquivo inválido'));
 });
 
@@ -712,7 +749,7 @@ async function pull() {
   return { exists: true, sha: j.sha, data };
 }
 function applyRemote(rm) {
-  S = rm.data; SY.sha = rm.sha; saveSY();
+  S = migrate(rm.data); SY.sha = rm.sha; saveSY();
   try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ }
   syDirty = false; render();
 }
