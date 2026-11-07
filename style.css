@@ -89,3 +89,8 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .vrow .uc{font-weight:700;padding-bottom:9px}.vrow .uc label{margin-bottom:0}
 @media(max-width:700px){.vrow{grid-template-columns:1fr 1fr}.vrow>div:first-child{grid-column:1/-1}}
 a{color:var(--accent);font-weight:700}
+.erow{display:grid;grid-template-columns:1.5fr 170px 110px 110px;gap:10px;align-items:end;padding:10px 0;border-bottom:1px solid var(--line)}
+.erow2{grid-template-columns:1.4fr 170px 100px 190px 110px}
+.erow .uc{font-weight:700;padding-bottom:9px}
+.stepper{display:flex;gap:4px}.stepper .btn{padding:6px 10px}.stepper input{text-align:center}
+@media(max-width:820px){.erow,.erow2{grid-template-columns:1fr 1fr}.erow>div:first-child{grid-column:1/-1}}

@@ -173,6 +173,7 @@ $('#tabs').addEventListener('click', e => {
 function render() {
   if (tab === 'produtos') renderProdutos();
   else if (tab === 'vendas') renderVendas();
+  else if (tab === 'estoque') renderEstoque();
   else if (tab === 'insumos') renderInsumos();
   else renderConfig();
 }
@@ -639,7 +640,9 @@ app.addEventListener('input', e => {
     else VF[f] = t.value;
   } else if (t.dataset.vs) {
     const v = S.vendas.find(x => x.id === t.dataset.vs); if (!v) return;
-    v[t.dataset.f] = num(t.value); save();
+    const antes = num(v.qtd); v[t.dataset.f] = num(t.value);
+    if (t.dataset.f === 'qtd' && v.baixa) { const pv = prod(v.prodId); if (pv && pv.estoque != null) pv.estoque = fq(num(pv.estoque) - (num(v.qtd) - antes)); }
+    save();
     const c = $(`[data-vl="${v.id}"]`); if (c) c.innerHTML = vLinhaCalc(v);
     renderVResumo();
   }
@@ -656,13 +659,162 @@ app.addEventListener('click', e => {
     if (!(VF.qtd > 0)) { toast('Informe a quantidade'); return; }
     if (!(VF.preco > 0)) { toast('Informe o preço cobrado'); return; }
     const c = calc(p);
-    S.vendas.unshift({ id: uid(), data: VF.data || hoje(), prodId: p.id, nome: p.nome, canal: VF.canal, qtd: VF.qtd, preco: VF.preco, custo: c.custo, adic: c.adic, taxaPct: VF.canal === 'ifood' ? c.taxasPct : num(S.settings.taxasSite), obs: VF.obs.trim() });
-    save(); toast(`Venda registrada: ${p.nome} · ${brl(VF.preco * VF.qtd)} ✓`);
+    const venda = { id: uid(), data: VF.data || hoje(), prodId: p.id, nome: p.nome, canal: VF.canal, qtd: VF.qtd, preco: VF.preco, custo: c.custo, adic: c.adic, taxaPct: VF.canal === 'ifood' ? c.taxasPct : num(S.settings.taxasSite), obs: VF.obs.trim() };
+    if (p.estoque != null) { p.estoque = fq(num(p.estoque) - VF.qtd); venda.baixa = true; }
+    S.vendas.unshift(venda);
+    save(); toast(`Venda registrada: ${p.nome} · ${brl(VF.preco * VF.qtd)} ✓${venda.baixa ? ` (estoque: ${p.estoque})` : ''}`);
     vFormReset(VF); renderVForm(); renderVResumo(); renderVLista();
   } else if (b.dataset.delVenda) {
     const v = S.vendas.find(x => x.id === b.dataset.delVenda);
     if (!v || !confirm(`Excluir a venda de "${v.nome}" (${fmtData(v.data)})?`)) return;
+    const pv = prod(v.prodId); if (v.baixa && pv && pv.estoque != null) pv.estoque = fq(num(pv.estoque) + num(v.qtd));
     S.vendas = S.vendas.filter(x => x.id !== v.id); save(); renderVResumo(); renderVLista();
+  }
+});
+
+/* ---------- Aba Estoque (insumos e cestas) ---------- */
+// i.estoque / p.estoque: quantidade atual (vazio = não controlado). i.minimo / p.minimo: alerta de reposição.
+let eSub = 'insumos';
+let eFiltro = { q: '', cat: '', falta: false };
+const fq = n => Math.round(num(n) * 100) / 100;
+const stepUn = u => ['g', 'ml'].includes(u) ? 100 : 1;
+function estStatus(est, min) {
+  if (est == null) return ['não controlado', 'hint'];
+  if (est <= 0) return ['Sem estoque', 'bad'];
+  if (num(min) > 0 && est <= num(min)) return ['Baixo', 'warn'];
+  return ['OK', 'ok'];
+}
+// Quanto de cada insumo uma receita consome (inclui sub-produtos e filamento da impressão 3D)
+function consumo(p, mult, acc = {}, stack = []) {
+  if (stack.includes(p.id)) return acc;
+  for (const l of p.linhas) {
+    if (l.kind === 'insumo') { if (insumo(l.ref)) acc[l.ref] = (acc[l.ref] || 0) + num(l.qtd) * mult; }
+    else { const q = prod(l.ref); if (q) consumo(q, num(l.qtd) * mult, acc, [...stack, p.id]); }
+  }
+  if (p.imp && p.imp.on && insumo(p.imp.fil) && num(p.imp.gramas) > 0) {
+    const f = insumo(p.imp.fil);
+    acc[f.id] = (acc[f.id] || 0) + num(p.imp.gramas) * (1 + num(p.imp.falha ?? S.settings.falha) / 100) * mult / (f.un === 'kg' ? 1000 : 1);
+  }
+  return acc;
+}
+function capacidade(p) {
+  const need = consumo(p, 1); let min = Infinity, lim = '';
+  for (const [id, n] of Object.entries(need)) {
+    const i = insumo(id); if (!i || i.estoque == null || n <= 0) continue;
+    const c = Math.floor(num(i.estoque) / n + 1e-9);
+    if (c < min) { min = c; lim = i.nome.trim(); }
+  }
+  return isFinite(min) ? { n: Math.max(min, 0), lim } : null;
+}
+
+function renderEstoque() {
+  app.innerHTML = `
+  <h2>Estoque</h2>
+  <p class="hint">Controle separado do preço: quanto você tem de cada insumo e quantas cestas prontas. Deixe o campo vazio para não controlar um item.</p>
+  <div class="seg" style="max-width:340px;margin:10px 0">
+    <button class="${eSub === 'insumos' ? 'on' : ''}" data-esub="insumos">🍫 Insumos</button>
+    <button class="${eSub === 'cestas' ? 'on' : ''}" data-esub="cestas">🧺 Cestas prontas</button>
+  </div>
+  <div id="eBody"></div>`;
+  renderEBody();
+}
+function renderEBody() {
+  const el = $('#eBody'); if (!el) return;
+  if (eSub === 'insumos') {
+    el.innerHTML = `<div id="eKpis"></div>
+      <div class="filters">
+        <input id="eq" placeholder="Buscar insumo…" value="${esc(eFiltro.q)}">
+        <select id="ec"><option value="">Todas as categorias</option>${CATS_INSUMO.map(c => opt(c, c, eFiltro.cat)).join('')}</select>
+        <label class="toggle"><input type="checkbox" id="ef" ${eFiltro.falta ? 'checked' : ''}> Só em falta / baixo</label>
+      </div>
+      <div class="card" id="eLista"></div>`;
+    renderEInsumos();
+  } else {
+    el.innerHTML = `<div id="eKpis"></div><div class="card" id="eLista" style="margin-top:12px"></div>`;
+    renderECestas();
+  }
+  renderEKpis();
+}
+function renderEKpis() {
+  const el = $('#eKpis'); if (!el) return;
+  if (eSub === 'insumos') {
+    const ctrl = S.insumos.filter(i => i.estoque != null);
+    const falta = ctrl.filter(i => estStatus(i.estoque, i.minimo)[1] !== 'ok').length;
+    const val = ctrl.reduce((a, i) => a + Math.max(num(i.estoque), 0) * unitCost(i), 0);
+    el.innerHTML = `<div class="kpis"><div class="kpi"><label>Insumos controlados</label><b>${ctrl.length}</b></div><div class="kpi"><label>Em falta / baixo</label><b class="${falta ? 'bad' : 'ok'}">${falta}</b></div><div class="kpi"><label>Valor parado em insumos</label><b>${brl(val)}</b></div></div>`;
+  } else {
+    const ctrl = S.produtos.filter(p => p.estoque != null);
+    const un = ctrl.reduce((a, p) => a + Math.max(num(p.estoque), 0), 0);
+    const val = ctrl.reduce((a, p) => a + Math.max(num(p.estoque), 0) * calc(p).custo, 0);
+    const falta = ctrl.filter(p => estStatus(p.estoque, p.minimo)[1] !== 'ok').length;
+    el.innerHTML = `<div class="kpis"><div class="kpi"><label>Cestas prontas</label><b>${un}</b></div><div class="kpi"><label>Em falta / baixo</label><b class="${falta ? 'bad' : 'ok'}">${falta}</b></div><div class="kpi"><label>Custo em estoque</label><b>${brl(val)}</b></div></div>`;
+  }
+}
+function renderEInsumos() {
+  const q = eFiltro.q.trim().toLowerCase();
+  const its = S.insumos.filter(i => (!eFiltro.cat || i.cat === eFiltro.cat) && (!q || i.nome.toLowerCase().includes(q))
+    && (!eFiltro.falta || (i.estoque != null && estStatus(i.estoque, i.minimo)[1] !== 'ok')))
+    .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  $('#eLista').innerHTML = its.length ? its.map(i => {
+    const [st, cl] = estStatus(i.estoque, i.minimo);
+    return `<div class="erow">
+      <div><b>${esc(i.nome.trim())}</b><div class="hint">${esc(i.cat)} · ${brl(unitCost(i))}/${esc(i.un)}</div></div>
+      <div><label>Em estoque (${esc(i.un)})</label><div class="stepper"><button class="btn" data-estep="${i.id}" data-d="-1">−</button>${numIn(`data-ei="${i.id}" data-f="estoque"`, i.estoque, '—')}<button class="btn" data-estep="${i.id}" data-d="1">+</button></div></div>
+      <div><label>Avisar abaixo de</label>${numIn(`data-ei="${i.id}" data-f="minimo"`, i.minimo, '—')}</div>
+      <div class="uc"><span class="${cl}" data-est-st="${i.id}">${st}</span></div>
+    </div>`;
+  }).join('') : '<div class="empty">Nenhum insumo encontrado.</div>';
+}
+function renderECestas() {
+  $('#eLista').innerHTML = S.produtos.length ? S.produtos.map(p => {
+    const [st, cl] = estStatus(p.estoque, p.minimo); const cap = capacidade(p);
+    return `<div class="erow erow2">
+      <div><b>${esc(p.nome)}</b><div class="hint">${esc(p.cat)} · custo ${brl(calc(p).custo)}${cap ? ` · dá para montar mais <b>${cap.n}</b> (limite: ${esc(cap.lim)})` : ''}</div></div>
+      <div><label>Prontas em estoque</label><div class="stepper"><button class="btn" data-pstep="${p.id}" data-d="-1">−</button>${numIn(`data-ep="${p.id}" data-f="estoque"`, p.estoque, '—')}<button class="btn" data-pstep="${p.id}" data-d="1">+</button></div></div>
+      <div><label>Avisar abaixo de</label>${numIn(`data-ep="${p.id}" data-f="minimo"`, p.minimo, '—')}</div>
+      <div><label>Montar novas</label><div class="stepper">${numIn(`data-eq="${p.id}"`, 1)}<button class="btn pri" data-produzir="${p.id}">Produzir</button></div></div>
+      <div class="uc"><span class="${cl}" data-est-st="${p.id}">${st}</span></div>
+    </div>`;
+  }).join('') : '<div class="empty">Cadastre produtos na aba Produtos.</div>';
+}
+function estSet(obj, f, v) { obj[f] = v === '' ? null : num(v); }
+function estRefreshStatus(obj) {
+  const el = $(`[data-est-st="${obj.id}"]`); if (!el) return;
+  const [st, cl] = estStatus(obj.estoque, obj.minimo); el.textContent = st; el.className = cl;
+}
+app.addEventListener('input', e => {
+  if (tab !== 'estoque') return;
+  const t = e.target;
+  if (t.dataset.ei || t.dataset.ep) {
+    const obj = t.dataset.ei ? insumo(t.dataset.ei) : prod(t.dataset.ep); if (!obj) return;
+    estSet(obj, t.dataset.f, t.value); save(); estRefreshStatus(obj); renderEKpis();
+  } else if (t.id === 'eq') { eFiltro.q = t.value; renderEInsumos(); }
+});
+app.addEventListener('change', e => {
+  if (tab !== 'estoque') return;
+  if (e.target.id === 'ec') { eFiltro.cat = e.target.value; renderEInsumos(); }
+  if (e.target.id === 'ef') { eFiltro.falta = e.target.checked; renderEInsumos(); }
+});
+app.addEventListener('click', e => {
+  if (tab !== 'estoque') return;
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.esub) { eSub = b.dataset.esub; renderEstoque(); return; }
+  const stepIt = (obj, d, step) => { obj.estoque = Math.max(fq(num(obj.estoque) + d * step), 0); save(); renderEBody(); };
+  if (b.dataset.estep) { const i = insumo(b.dataset.estep); if (i) stepIt(i, +b.dataset.d, stepUn(i.un)); }
+  else if (b.dataset.pstep) { const p = prod(b.dataset.pstep); if (p) { p.estoque = fq(num(p.estoque) + +b.dataset.d); save(); renderEBody(); } }
+  else if (b.dataset.produzir) {
+    const p = prod(b.dataset.produzir); if (!p) return;
+    const q = num($(`[data-eq="${p.id}"]`).value);
+    if (!(q > 0)) { toast('Informe quantas cestas vai montar'); return; }
+    const need = consumo(p, q);
+    const ctrl = Object.entries(need).map(([id, n]) => [insumo(id), n]).filter(([i]) => i && i.estoque != null);
+    const falta = ctrl.filter(([i, n]) => num(i.estoque) < n - 1e-9);
+    let msg = `Montar ${q}× "${p.nome}"?\n\nVai dar baixa em:\n` + (ctrl.length ? ctrl.slice(0, 10).map(([i, n]) => `• ${i.nome.trim()}: −${fq(n)} ${i.un}`).join('\n') : '(nenhum insumo controlado)');
+    if (falta.length) msg += `\n\n⚠ Estoque insuficiente de: ${falta.map(([i, n]) => `${i.nome.trim()} (tem ${fq(i.estoque)}, precisa ${fq(n)})`).join(', ')}.\nMontar mesmo assim? (o estoque ficará negativo)`;
+    if (!confirm(msg)) return;
+    ctrl.forEach(([i, n]) => { i.estoque = fq(num(i.estoque) - n); });
+    p.estoque = fq(num(p.estoque) + q);
+    save(); renderEBody(); toast(`${q}× ${p.nome} montada(s) ✓`);
   }
 });
 
