@@ -79,3 +79,13 @@ button:disabled{opacity:.5;cursor:not-allowed}
 .site label{color:var(--accent)}
 .big2{font-size:30px;font-weight:800;line-height:1.1;color:var(--ink)}
 .site .btn{margin-top:8px;width:100%}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:6px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.kpi label{margin:0}.kpi b{display:block;font-size:22px;margin-top:2px}
+.seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{flex:1;border:0;background:var(--bg);color:var(--muted);padding:9px 6px;font:inherit;font-weight:700;cursor:pointer}
+.seg button.on{background:var(--accent);color:var(--accent-ink)}
+.vrow{display:grid;grid-template-columns:1.6fr 90px 120px 110px 34px;gap:10px;align-items:end;padding:10px 0;border-bottom:1px solid var(--line)}
+.vrow .uc{font-weight:700;padding-bottom:9px}.vrow .uc label{margin-bottom:0}
+@media(max-width:700px){.vrow{grid-template-columns:1fr 1fr}.vrow>div:first-child{grid-column:1/-1}}
+a{color:var(--accent);font-weight:700}

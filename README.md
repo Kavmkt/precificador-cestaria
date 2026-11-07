@@ -12,6 +12,7 @@ App 100% estático (HTML + CSS + JS, sem build e sem servidor). Os dados ficam n
 - **Mão de obra**, **rateio de custos fixos**, **perdas** e **custos extras** (frete, arte…).
 - **Preço de venda**: por padrão custo × (1 + margem) ÷ (1 − taxas) (margem sobre o custo; taxas saem do preço final). Opcional: margem como % do preço de venda, custo ÷ (1 − margem − taxas). Também mostra preço mínimo, lucro líquido e arredondamento.
 - **Nota fiscal com IA**: foto ou PDF da nota na aba Insumos; a IA (Claude ou Gemini, chave própria) lê os itens, atualiza preços existentes e adiciona os novos após revisão.
+- **Vendas**: aba para registrar vendas por cesta e canal (iFood ou site), com preço sugerido editável, lucro por venda e painel por período.
 - Copia a descrição para o cliente (WhatsApp) e o resumo de custos.
 
 ## Rodar localmente

@@ -50,11 +50,13 @@ function seed() {
     settings: { hora: 20, kwh: 0.95, watts: 200, desgasteHora: 1.5, falha: 5, perda: 3, fixosMes: 600, producaoMes: 80, margem: 100, taxas: 20 },
     insumos: [pla, cesta, palha, fita, celo, bolo, choc, suco, rosa, cartao, chav],
     produtos: [cafe, chaveiro],
+    vendas: [],
     sel: cafe.id
   };
 }
 /* Migração: "frete/entrega" que estava em custos extras passa para "somado no final" (não leva lucro nem taxas). */
 function migrate(d) {
+  d.vendas = d.vendas || [];
   for (const p of d.produtos || []) {
     p.adicionais = p.adicionais || [];
     const keep = [];
@@ -170,6 +172,7 @@ $('#tabs').addEventListener('click', e => {
 
 function render() {
   if (tab === 'produtos') renderProdutos();
+  else if (tab === 'vendas') renderVendas();
   else if (tab === 'insumos') renderInsumos();
   else renderConfig();
 }
@@ -474,7 +477,7 @@ app.addEventListener('click', e => {
       const a = document.createElement('a'); a.href = url; a.download = `precificador-backup-${new Date().toISOString().slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url);
     } else if (b.id === 'imp') $('#impFile').click();
     else if (b.id === 'reset') { if (confirm('Apagar TODOS os dados e voltar ao exemplo inicial?')) { S = seed(); save(); renderConfig(); toast('Dados reiniciados'); } }
-    else if (b.id === 'vazio') { if (confirm('Apagar TODOS os dados e começar do zero?')) { S = { settings: S.settings, insumos: [], produtos: [], sel: null }; save(); renderConfig(); toast('Tudo limpo'); } }
+    else if (b.id === 'vazio') { if (confirm('Apagar TODOS os dados e começar do zero?')) { S = { settings: S.settings, insumos: [], produtos: [], vendas: [], sel: null }; save(); renderConfig(); toast('Tudo limpo'); } }
   }
 });
 app.addEventListener('change', e => {
@@ -518,6 +521,150 @@ function renderListaInsumos() {
       <button class="x" data-del-ins="${i.id}" title="Excluir">✕</button>
     </div>`).join('') : '<div class="empty">Nenhum insumo encontrado.</div>';
 }
+
+/* ---------- Aba Vendas ---------- */
+const CANAIS = { ifood: 'iFood', site: 'Site' };
+const PERIODOS = { hoje: 'Hoje', '7d': 'Últimos 7 dias', mes: 'Este mês', mesAnt: 'Mês passado', tudo: 'Todo o período' };
+let vPeriodo = 'mes';
+let VF = null; // rascunho do formulário de nova venda
+const isoLocal = d => { const x = new Date(d); x.setMinutes(x.getMinutes() - x.getTimezoneOffset()); return x.toISOString().slice(0, 10); };
+const hoje = () => isoLocal(new Date());
+const fmtData = s => { const [y, m, d] = String(s).split('-'); return d ? `${d}/${m}/${y.slice(2)}` : s; };
+
+function vPrecoSugerido(p, canal) {
+  if (!p) return 0;
+  const c = calc(p); const v = canal === 'ifood' ? c.preco : c.precoSite;
+  return isFinite(v) ? Math.round(v * 100) / 100 : 0;
+}
+function vFormReset(keep) {
+  const prodId = keep?.prodId && prod(keep.prodId) ? keep.prodId : (S.produtos[0]?.id || '');
+  const canal = keep?.canal || 'ifood';
+  VF = { prodId, canal, qtd: 1, data: keep?.data || hoje(), obs: '', preco: vPrecoSugerido(prod(prodId), canal) };
+}
+// Resultado de uma venda com os valores congelados no momento do registro
+function vCalc(v) {
+  const q = num(v.qtd), pr = num(v.preco);
+  const rec = pr * q;
+  const base = Math.max(pr - num(v.adic), 0) * q; // frete é repassado, não é receita do produto
+  const taxa = base * num(v.taxaPct) / 100;
+  const custo = num(v.custo) * q;
+  return { rec, taxa, custo, lucro: base - taxa - custo };
+}
+function vDentro(v) {
+  const h = hoje();
+  if (vPeriodo === 'tudo') return true;
+  if (vPeriodo === 'hoje') return v.data === h;
+  if (vPeriodo === '7d') { const d = new Date(); d.setDate(d.getDate() - 6); return v.data >= isoLocal(d); }
+  const ini = h.slice(0, 8) + '01';
+  if (vPeriodo === 'mes') return v.data >= ini;
+  const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1);
+  const iniAnt = isoLocal(d); return v.data >= iniAnt && v.data < ini;
+}
+
+function renderVendas() {
+  if (!VF) vFormReset();
+  app.innerHTML = `
+  <h2>Vendas</h2>
+  <p class="hint">Registre cada venda escolhendo a cesta e o canal. O preço vem pronto (iFood ou site) e você pode alterá-lo.</p>
+  <div class="card" id="vForm"></div>
+  <div class="filters" style="margin-top:16px"><select id="vPer">${Object.entries(PERIODOS).map(([k, l]) => opt(k, l, vPeriodo)).join('')}</select></div>
+  <div id="vResumo"></div>
+  <div class="card" id="vLista" style="margin-top:14px"></div>`;
+  renderVForm(); renderVResumo(); renderVLista();
+}
+function renderVForm() {
+  const el = $('#vForm'); if (!el) return;
+  if (!S.produtos.length) { el.innerHTML = '<div class="empty">Cadastre um produto/cesta na aba Produtos para registrar vendas.</div>'; return; }
+  const p = prod(VF.prodId); const c = p ? calc(p) : null;
+  el.innerHTML = `
+    <div class="grid">
+      <div style="grid-column:span 2"><label>Cesta / produto vendido</label>
+        <select data-vf="prodId">${S.produtos.map(x => opt(x.id, x.nome || 'Sem nome', VF.prodId)).join('')}</select></div>
+      <div><label>Canal da venda</label>
+        <div class="seg">${Object.entries(CANAIS).map(([k, l]) => `<button class="${VF.canal === k ? 'on' : ''}" data-canal="${k}">${l}</button>`).join('')}</div></div>
+    </div>
+    <div class="grid" style="margin-top:10px">
+      <div><label>Preço cobrado (R$)</label>${numIn('data-vf="preco"', VF.preco)}
+        <div class="hint">Sugerido ${VF.canal === 'ifood' ? 'iFood' : 'site'}: <a href="#" data-usar-sug>${brl(vPrecoSugerido(p, VF.canal))}</a>${c && c.adic ? ` (inclui ${brl(c.adic)} de frete)` : ''}</div></div>
+      <div><label>Quantidade</label>${numIn('data-vf="qtd"', VF.qtd)}</div>
+      <div><label>Data</label><input type="date" data-vf="data" value="${esc(VF.data)}"></div>
+      <div><label>Observação (opcional)</label><input data-vf="obs" value="${esc(VF.obs)}" placeholder="Cliente, pedido…"></div>
+    </div>
+    <div class="bar"><button class="btn pri" id="vAdd">Registrar venda</button></div>`;
+}
+function renderVResumo() {
+  const el = $('#vResumo'); if (!el) return;
+  const vs = S.vendas.filter(vDentro);
+  const tot = vs.reduce((a, v) => { const r = vCalc(v); a.rec += r.rec; a.lucro += r.lucro; a.q += num(v.qtd); return a; }, { rec: 0, lucro: 0, q: 0 });
+  const porCanal = Object.keys(CANAIS).map(k => {
+    const x = vs.filter(v => v.canal === k).reduce((a, v) => { const r = vCalc(v); a.rec += r.rec; a.lucro += r.lucro; a.q += num(v.qtd); return a; }, { rec: 0, lucro: 0, q: 0 });
+    return { k, ...x };
+  });
+  const top = Object.values(vs.reduce((a, v) => { (a[v.nome] ||= { nome: v.nome, q: 0, rec: 0 }).q += num(v.qtd); a[v.nome].rec += vCalc(v).rec; return a; }, {})).sort((a, b) => b.q - a.q).slice(0, 5);
+  el.innerHTML = `
+    <div class="kpis">
+      <div class="kpi"><label>Faturamento</label><b>${brl(tot.rec)}</b></div>
+      <div class="kpi"><label>Lucro líquido</label><b class="${tot.lucro < 0 ? 'bad' : 'ok'}">${brl(tot.lucro)}</b></div>
+      <div class="kpi"><label>Cestas vendidas</label><b>${tot.q}</b></div>
+      <div class="kpi"><label>Ticket médio</label><b>${brl(tot.q ? tot.rec / tot.q : 0)}</b></div>
+    </div>
+    <div class="grid g2" style="margin-top:12px">
+      <div class="card"><h3 style="margin-top:0">Por canal</h3>
+        ${porCanal.map(x => `<div class="kv"><span><span class="pill">${CANAIS[x.k]}</span> ${x.q} un.</span><span>${brl(x.rec)} · lucro ${brl(x.lucro)}</span></div>`).join('')}
+        <div class="stack">${porCanal.map((x, i) => `<span style="width:${tot.rec ? x.rec / tot.rec * 100 : 0}%;background:${i ? 'var(--c3)' : 'var(--c6)'}"></span>`).join('')}</div></div>
+      <div class="card"><h3 style="margin-top:0">Mais vendidos</h3>
+        ${top.length ? top.map(t => `<div class="kv"><span>${esc(t.nome)}</span><span>${t.q} un. · ${brl(t.rec)}</span></div>`).join('') : '<div class="hint">Sem vendas no período.</div>'}</div>
+    </div>`;
+}
+function vLinhaCalc(v) { const r = vCalc(v); return `<span class="${r.lucro < 0 ? 'bad' : 'ok'}">${brl(r.lucro)}</span>`; }
+function renderVLista() {
+  const el = $('#vLista'); if (!el) return;
+  const vs = S.vendas.filter(vDentro).sort((a, b) => b.data.localeCompare(a.data));
+  el.innerHTML = `<h3 style="margin-top:0">Vendas do período (${vs.length})</h3>` + (vs.length ? vs.map(v => `
+    <div class="vrow">
+      <div><b>${esc(v.nome)}</b><div class="hint">${fmtData(v.data)} · <span class="pill">${CANAIS[v.canal] || v.canal}</span>${v.obs ? ' · ' + esc(v.obs) : ''}</div></div>
+      <div><label>Qtd.</label>${numIn(`data-vs="${v.id}" data-f="qtd"`, v.qtd)}</div>
+      <div><label>Preço (R$)</label>${numIn(`data-vs="${v.id}" data-f="preco"`, v.preco)}</div>
+      <div class="uc"><label>Lucro</label><span data-vl="${v.id}">${vLinhaCalc(v)}</span></div>
+      <button class="x" data-del-venda="${v.id}" title="Excluir venda">✕</button>
+    </div>`).join('') : '<div class="empty">Nenhuma venda neste período.</div>');
+}
+app.addEventListener('input', e => {
+  if (tab !== 'vendas') return;
+  const t = e.target;
+  if (t.dataset.vf) {
+    const f = t.dataset.vf;
+    if (f === 'prodId') { VF.prodId = t.value; VF.preco = vPrecoSugerido(prod(VF.prodId), VF.canal); renderVForm(); }
+    else if (f === 'preco' || f === 'qtd') VF[f] = num(t.value);
+    else VF[f] = t.value;
+  } else if (t.dataset.vs) {
+    const v = S.vendas.find(x => x.id === t.dataset.vs); if (!v) return;
+    v[t.dataset.f] = num(t.value); save();
+    const c = $(`[data-vl="${v.id}"]`); if (c) c.innerHTML = vLinhaCalc(v);
+    renderVResumo();
+  }
+});
+app.addEventListener('change', e => { if (tab === 'vendas' && e.target.id === 'vPer') { vPeriodo = e.target.value; renderVResumo(); renderVLista(); } });
+app.addEventListener('click', e => {
+  if (tab !== 'vendas') return;
+  const a = e.target.closest('[data-usar-sug]');
+  if (a) { e.preventDefault(); VF.preco = vPrecoSugerido(prod(VF.prodId), VF.canal); renderVForm(); return; }
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.canal) { VF.canal = b.dataset.canal; VF.preco = vPrecoSugerido(prod(VF.prodId), VF.canal); renderVForm(); }
+  else if (b.id === 'vAdd') {
+    const p = prod(VF.prodId); if (!p) return;
+    if (!(VF.qtd > 0)) { toast('Informe a quantidade'); return; }
+    if (!(VF.preco > 0)) { toast('Informe o preço cobrado'); return; }
+    const c = calc(p);
+    S.vendas.unshift({ id: uid(), data: VF.data || hoje(), prodId: p.id, nome: p.nome, canal: VF.canal, qtd: VF.qtd, preco: VF.preco, custo: c.custo, adic: c.adic, taxaPct: VF.canal === 'ifood' ? c.taxasPct : num(S.settings.taxasSite), obs: VF.obs.trim() });
+    save(); toast(`Venda registrada: ${p.nome} · ${brl(VF.preco * VF.qtd)} ✓`);
+    vFormReset(VF); renderVForm(); renderVResumo(); renderVLista();
+  } else if (b.dataset.delVenda) {
+    const v = S.vendas.find(x => x.id === b.dataset.delVenda);
+    if (!v || !confirm(`Excluir a venda de "${v.nome}" (${fmtData(v.data)})?`)) return;
+    S.vendas = S.vendas.filter(x => x.id !== v.id); save(); renderVResumo(); renderVLista();
+  }
+});
 
 /* ---------- Nota fiscal com IA ---------- */
 const AI_KEY = 'precificador-ai-v1';
