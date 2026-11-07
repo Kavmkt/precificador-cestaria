@@ -540,16 +540,18 @@ function vPrecoSugerido(p, canal) {
 function vFormReset(keep) {
   const prodId = keep?.prodId && prod(keep.prodId) ? keep.prodId : (S.produtos[0]?.id || '');
   const canal = keep?.canal || 'ifood';
-  VF = { prodId, canal, qtd: 1, data: keep?.data || hoje(), obs: '', preco: vPrecoSugerido(prod(prodId), canal) };
+  VF = { prodId, canal, qtd: 1, data: keep?.data || hoje(), obs: '', adicionais: [], preco: vPrecoSugerido(prod(prodId), canal) };
 }
 // Resultado de uma venda com os valores congelados no momento do registro
 function vCalc(v) {
   const q = num(v.qtd), pr = num(v.preco);
-  const rec = pr * q;
-  const base = Math.max(pr - num(v.adic), 0) * q; // frete é repassado, não é receita do produto
+  const ad = (v.adicionais || []).reduce((a, x) => a + num(x.valor), 0);        // adicionais manuais (vendidos junto)
+  const adCusto = (v.adicionais || []).reduce((a, x) => a + num(x.custo), 0);
+  const rec = pr * q + ad;
+  const base = Math.max(pr - num(v.adic), 0) * q + ad; // frete é repassado, não é receita do produto
   const taxa = base * num(v.taxaPct) / 100;
-  const custo = num(v.custo) * q;
-  return { rec, taxa, custo, lucro: base - taxa - custo };
+  const custo = num(v.custo) * q + adCusto;
+  return { rec, taxa, custo, ad, lucro: base - taxa - custo };
 }
 function vDentro(v) {
   const h = hoje();
@@ -591,7 +593,21 @@ function renderVForm() {
       <div><label>Data</label><input type="date" data-vf="data" value="${esc(VF.data)}"></div>
       <div><label>Observação (opcional)</label><input data-vf="obs" value="${esc(VF.obs)}" placeholder="Cliente, pedido…"></div>
     </div>
-    <div class="bar"><button class="btn pri" id="vAdd">Registrar venda</button></div>`;
+    <div class="sec"><h3>Adicionais da venda</h3>
+      <p class="hint">Algo a mais que o cliente comprou junto (balão, cartão, bebida…). Escreva o que foi e o valor cobrado — é somado ao total da venda.</p>
+      ${VF.adicionais.map((x, i) => `<div class="adrow">
+        <input placeholder="O que foi vendido" value="${esc(x.desc)}" data-vad="${i}" data-f="desc">
+        ${numIn(`data-vad="${i}" data-f="valor"`, x.valor, 'Valor R$')}
+        ${numIn(`data-vad="${i}" data-f="custo"`, x.custo, 'Custo (opc.)')}
+        <button class="x" data-del-vad="${i}" title="Remover">✕</button></div>`).join('')}
+      <div class="bar"><button class="btn green" id="vAddAd">+ Adicionar adicional</button></div>
+    </div>
+    <div class="bar" style="align-items:center"><button class="btn pri" id="vAdd">Registrar venda</button><span>Total da venda: <b id="vTotal"></b></span></div>`;
+  vTotalUpd();
+}
+function vTotalUpd() {
+  const el = $('#vTotal'); if (!el) return;
+  el.textContent = brl(num(VF.preco) * num(VF.qtd) + VF.adicionais.reduce((a, x) => a + num(x.valor), 0));
 }
 function renderVResumo() {
   const el = $('#vResumo'); if (!el) return;
@@ -623,7 +639,7 @@ function renderVLista() {
   const vs = S.vendas.filter(vDentro).sort((a, b) => b.data.localeCompare(a.data));
   el.innerHTML = `<h3 style="margin-top:0">Vendas do período (${vs.length})</h3>` + (vs.length ? vs.map(v => `
     <div class="vrow">
-      <div><b>${esc(v.nome)}</b><div class="hint">${fmtData(v.data)} · <span class="pill">${CANAIS[v.canal] || v.canal}</span>${v.obs ? ' · ' + esc(v.obs) : ''}</div></div>
+      <div><b>${esc(v.nome)}</b><div class="hint">${fmtData(v.data)} · <span class="pill">${CANAIS[v.canal] || v.canal}</span>${v.obs ? ' · ' + esc(v.obs) : ''}</div>${(v.adicionais || []).length ? `<div class="hint">+ ${v.adicionais.map(x => `${esc(x.desc)} (${brl(x.valor)})`).join(', ')}</div>` : ''}<div class="hint">Total da venda: <b>${brl(vCalc(v).rec)}</b></div></div>
       <div><label>Qtd.</label>${numIn(`data-vs="${v.id}" data-f="qtd"`, v.qtd)}</div>
       <div><label>Preço (R$)</label>${numIn(`data-vs="${v.id}" data-f="preco"`, v.preco)}</div>
       <div class="uc"><label>Lucro</label><span data-vl="${v.id}">${vLinhaCalc(v)}</span></div>
@@ -636,8 +652,11 @@ app.addEventListener('input', e => {
   if (t.dataset.vf) {
     const f = t.dataset.vf;
     if (f === 'prodId') { VF.prodId = t.value; VF.preco = vPrecoSugerido(prod(VF.prodId), VF.canal); renderVForm(); }
-    else if (f === 'preco' || f === 'qtd') VF[f] = num(t.value);
+    else if (f === 'preco' || f === 'qtd') { VF[f] = num(t.value); vTotalUpd(); }
     else VF[f] = t.value;
+  } else if (t.dataset.vad !== undefined) {
+    const x = VF.adicionais[+t.dataset.vad]; if (!x) return;
+    x[t.dataset.f] = t.dataset.f === 'desc' ? t.value : num(t.value); vTotalUpd();
   } else if (t.dataset.vs) {
     const v = S.vendas.find(x => x.id === t.dataset.vs); if (!v) return;
     const antes = num(v.qtd); v[t.dataset.f] = num(t.value);
@@ -654,15 +673,17 @@ app.addEventListener('click', e => {
   if (a) { e.preventDefault(); VF.preco = vPrecoSugerido(prod(VF.prodId), VF.canal); renderVForm(); return; }
   const b = e.target.closest('button'); if (!b) return;
   if (b.dataset.canal) { VF.canal = b.dataset.canal; VF.preco = vPrecoSugerido(prod(VF.prodId), VF.canal); renderVForm(); }
+  else if (b.id === 'vAddAd') { VF.adicionais.push({ desc: '', valor: 0, custo: 0 }); renderVForm(); $$('[data-vad][data-f="desc"]').pop()?.focus(); }
+  else if (b.dataset.delVad !== undefined) { VF.adicionais.splice(+b.dataset.delVad, 1); renderVForm(); }
   else if (b.id === 'vAdd') {
     const p = prod(VF.prodId); if (!p) return;
     if (!(VF.qtd > 0)) { toast('Informe a quantidade'); return; }
     if (!(VF.preco > 0)) { toast('Informe o preço cobrado'); return; }
     const c = calc(p);
-    const venda = { id: uid(), data: VF.data || hoje(), prodId: p.id, nome: p.nome, canal: VF.canal, qtd: VF.qtd, preco: VF.preco, custo: c.custo, adic: c.adic, taxaPct: VF.canal === 'ifood' ? c.taxasPct : num(S.settings.taxasSite), obs: VF.obs.trim() };
+    const venda = { id: uid(), data: VF.data || hoje(), prodId: p.id, nome: p.nome, canal: VF.canal, qtd: VF.qtd, preco: VF.preco, custo: c.custo, adic: c.adic, taxaPct: VF.canal === 'ifood' ? c.taxasPct : num(S.settings.taxasSite), obs: VF.obs.trim(), adicionais: VF.adicionais.filter(x => x.desc.trim() || num(x.valor)).map(x => ({ desc: x.desc.trim() || 'Adicional', valor: num(x.valor), custo: num(x.custo) })) };
     if (p.estoque != null) { p.estoque = fq(num(p.estoque) - VF.qtd); venda.baixa = true; }
     S.vendas.unshift(venda);
-    save(); toast(`Venda registrada: ${p.nome} · ${brl(VF.preco * VF.qtd)} ✓${venda.baixa ? ` (estoque: ${p.estoque})` : ''}`);
+    save(); toast(`Venda registrada: ${p.nome} · ${brl(vCalc(venda).rec)} ✓${venda.baixa ? ` (estoque: ${p.estoque})` : ''}`);
     vFormReset(VF); renderVForm(); renderVResumo(); renderVLista();
   } else if (b.dataset.delVenda) {
     const v = S.vendas.find(x => x.id === b.dataset.delVenda);
